@@ -1,10 +1,15 @@
 {
   "name": "pqc-sdk-demo",
   "private": true,
-  "scripts": { "dev": "next dev", "build": "next build", "start": "next start" },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
   "dependencies": {
     "@pqc-sdk/core": "latest",
-    "next": "14.2.15",
+    "@vercel/analytics": "^2.0.1",
+    "next": "^16.3.4",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
