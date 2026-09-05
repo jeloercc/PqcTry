@@ -17,6 +17,7 @@ PQC SDK gives JavaScript and TypeScript applications post-quantum hybrid encrypt
 The fastest way to understand PQC SDK is to run it:
 
 **[Open the browser demo →](https://jeloercc.github.io/pqc-sdk/)**
+<img width="1112" height="936" alt="Screenshot 2026-09-05 at 12 29 39 PM" src="https://github.com/user-attachments/assets/e4524a4b-3384-4ae9-a452-b60929166d12" />
 
 In one local browser flow, you can:
 
