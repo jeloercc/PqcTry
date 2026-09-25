@@ -1,79 +1,949 @@
 "use client";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import type { KeyPair } from "@pqc-sdk/core";
+import type { KeyPair, KemAlgorithm, SignatureAlgorithm } from "@pqc-sdk/core";
 
-type Algorithm = "ml-kem-768" | "x-wing";
-type Phase = "idle" | "generating" | "encrypting" | "decrypting";
-type KemPair = KeyPair<"ml-kem-768" | "x-wing">;
-type TraceEvent = {label:string; detail:string; time:number; tone:"accent"|"success"};
-type State = { message:string; algorithm:Algorithm; pair:KemPair|null; publicKeyText:string|null; secretKeyText:string|null; ciphertext:Uint8Array|null; plaintext:string|null; plaintextSize:number|null; verified:boolean; times:{key:number|null;encrypt:number|null;decrypt:number|null}; phase:Phase; error:string|null; trace:TraceEvent[] };
-type Action = {type:"message";value:string}|{type:"algorithm";value:Algorithm}|{type:"phase";value:Phase}|{type:"keys";pair:State["pair"];publicKeyText:string;secretKeyText:string;duration:number;elapsed:number}|{type:"import";pair:State["pair"];publicKeyText:string;secretKeyText:string;ciphertext:Uint8Array|null}|{type:"encrypted";value:Uint8Array;duration:number;elapsed:number}|{type:"decrypted";value:string;plaintextSize:number;duration:number;elapsed:number;verified:boolean}|{type:"error";value:string};
-const initial:State={message:"This message should remain private.",algorithm:"ml-kem-768",pair:null,publicKeyText:null,secretKeyText:null,ciphertext:null,plaintext:null,plaintextSize:null,verified:false,times:{key:null,encrypt:null,decrypt:null},phase:"idle",error:null,trace:[]};
-function reducer(s:State,a:Action):State{switch(a.type){case"message":return{...s,message:a.value,plaintext:null,plaintextSize:null,verified:false,times:{...s.times,decrypt:null},error:null,trace:s.pair?s.trace:[]};case"algorithm":return{...initial, message:s.message,algorithm:a.value};case"phase":return{...s,phase:a.value,error:null};case"keys":return{...s,pair:a.pair,publicKeyText:a.publicKeyText,secretKeyText:a.secretKeyText,phase:"idle",ciphertext:null,plaintext:null,plaintextSize:null,verified:false,times:{key:a.duration,encrypt:null,decrypt:null},error:null,trace:[{label:"Key pair generated",detail:"Post-quantum key pair ready",time:a.elapsed,tone:"accent"}]};case"import":return{...s,pair:a.pair,publicKeyText:a.publicKeyText,secretKeyText:a.secretKeyText,ciphertext:a.ciphertext,plaintext:null,plaintextSize:null,verified:false,phase:"idle",error:null,trace:[]};case"encrypted":return{...s,ciphertext:a.value,phase:"idle",plaintext:null,plaintextSize:null,verified:false,times:{...s.times,encrypt:a.duration,decrypt:null},error:null,trace:[...s.trace,{label:"Message encrypted",detail:"Ciphertext sealed with the public key",time:a.elapsed,tone:"accent"}]};case"decrypted":return{...s,plaintext:a.value,plaintextSize:a.plaintextSize,verified:a.verified,phase:"idle",times:{...s.times,decrypt:a.duration},error:null,trace:[...s.trace,{label:"Message decrypted",detail:"Plaintext returned",time:a.elapsed,tone:"accent"},...(a.verified?[{label:"Verification successful",detail:"Plaintext matches the original message",time:a.elapsed,tone:"success" as const}]:[{label:"Verification failed",detail:"Decrypted plaintext does not match the captured message",time:a.elapsed,tone:"accent" as const}])]};case"error":return{...s,phase:"idle",pair:null,publicKeyText:null,secretKeyText:null,ciphertext:null,plaintext:null,plaintextSize:null,verified:false,times:{key:null,encrypt:null,decrypt:null},error:a.value,trace:[]}}}
-const ms=(n:number|null)=>n===null?"Waiting":`${n.toFixed(1)} ms`;
-const code=`import { pqc } from '@pqc-sdk/core';
+// ── Algorithm types ─────────────────────────────────────────────────────────
+type DemoAlgorithm = KemAlgorithm | SignatureAlgorithm;
+type Mode = "encrypt" | "sign";
+type Phase = "idle" | "generating" | "encrypting" | "decrypting" | "signing" | "verifying";
+type KemPair = KeyPair<KemAlgorithm>;
+type DsaPair = KeyPair<SignatureAlgorithm>;
+type TraceEvent = { label: string; detail: string; time: number; tone: "accent" | "success" };
 
-const pair = await pqc.keys.generate();
+type State = {
+  mode: Mode;
+  message: string;
+  algorithm: DemoAlgorithm;
+  pair: KemPair | DsaPair | null;
+  publicKeyText: string | null;
+  secretKeyText: string | null;
+  // encrypt mode
+  ciphertext: Uint8Array | null;
+  plaintext: string | null;
+  plaintextSize: number | null;
+  verified: boolean;
+  // sign mode
+  signatureHex: string | null;
+  signatureValid: boolean | null;
+  times: { key: number | null; encrypt: number | null; decrypt: number | null; sign: number | null; verify: number | null };
+  phase: Phase;
+  error: string | null;
+  trace: TraceEvent[];
+};
 
-const ciphertext = await pqc.encrypt(
-  message,
-  pair.publicKey
-);
+type Action =
+  | { type: "message"; value: string }
+  | { type: "mode"; value: Mode }
+  | { type: "algorithm"; value: DemoAlgorithm }
+  | { type: "phase"; value: Phase }
+  | { type: "keys"; pair: State["pair"]; publicKeyText: string; secretKeyText: string; duration: number; elapsed: number }
+  | { type: "encrypted"; value: Uint8Array; duration: number; elapsed: number }
+  | { type: "decrypted"; value: string; plaintextSize: number; duration: number; elapsed: number; verified: boolean }
+  | { type: "signed"; signatureHex: string; duration: number; elapsed: number }
+  | { type: "verified"; valid: boolean; duration: number; elapsed: number }
+  | { type: "error"; value: string };
 
-const plaintext = await pqc.decrypt(
-  ciphertext,
-  pair.secretKey
-);`;
-async function generatePair(pqc: typeof import("@pqc-sdk/core").pqc, algorithm: Algorithm): Promise<KemPair> {
-  return algorithm === "x-wing" ? pqc.keys.generate({ algorithm: "x-wing" }) : pqc.keys.generate({ algorithm: "ml-kem-768" });
+const initialEncryptAlgorithm: KemAlgorithm = "x-wing";
+const initialSignAlgorithm: SignatureAlgorithm = "ml-dsa-65";
+
+const initial: State = {
+  mode: "encrypt",
+  message: "This message should remain private.",
+  algorithm: initialEncryptAlgorithm,
+  pair: null, publicKeyText: null, secretKeyText: null,
+  ciphertext: null, plaintext: null, plaintextSize: null, verified: false,
+  signatureHex: null, signatureValid: null,
+  times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null },
+  phase: "idle", error: null, trace: [],
+};
+
+function reducer(s: State, a: Action): State {
+  switch (a.type) {
+    case "message": return { ...s, message: a.value, plaintext: null, plaintextSize: null, verified: false, signatureValid: null, times: { ...s.times, decrypt: null, verify: null }, error: null, trace: s.pair ? s.trace : [] };
+    case "mode": {
+      const alg: DemoAlgorithm = a.value === "encrypt" ? initialEncryptAlgorithm : initialSignAlgorithm;
+      return { ...initial, mode: a.value, message: s.message, algorithm: alg };
+    }
+    case "algorithm": return { ...initial, mode: s.mode, message: s.message, algorithm: a.value as DemoAlgorithm };
+    case "phase": return { ...s, phase: a.value, error: null };
+    case "keys": return { ...s, pair: a.pair, publicKeyText: a.publicKeyText, secretKeyText: a.secretKeyText, phase: "idle", ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signatureHex: null, signatureValid: null, times: { key: a.duration, encrypt: null, decrypt: null, sign: null, verify: null }, error: null, trace: [{ label: "Key pair generated", detail: "Post-quantum key pair ready", time: a.elapsed, tone: "accent" }] };
+    case "encrypted": return { ...s, ciphertext: a.value, phase: "idle", plaintext: null, plaintextSize: null, verified: false, times: { ...s.times, encrypt: a.duration, decrypt: null }, error: null, trace: [...s.trace, { label: "Message encrypted", detail: "Ciphertext sealed with the public key", time: a.elapsed, tone: "accent" }] };
+    case "decrypted": return { ...s, plaintext: a.value, plaintextSize: a.plaintextSize, verified: a.verified, phase: "idle", times: { ...s.times, decrypt: a.duration }, error: null, trace: [...s.trace, { label: "Message decrypted", detail: "Plaintext returned", time: a.elapsed, tone: "accent" }, ...(a.verified ? [{ label: "Verification successful", detail: "Plaintext matches the original message", time: a.elapsed, tone: "success" as const }] : [{ label: "Verification failed", detail: "Decrypted plaintext does not match the captured message", time: a.elapsed, tone: "accent" as const }])] };
+    case "signed": return { ...s, signatureHex: a.signatureHex, signatureValid: null, phase: "idle", times: { ...s.times, sign: a.duration, verify: null }, error: null, trace: [...s.trace, { label: "Message signed", detail: "ML-DSA signature produced", time: a.elapsed, tone: "accent" }] };
+    case "verified": return { ...s, signatureValid: a.valid, phase: "idle", times: { ...s.times, verify: a.duration }, error: null, trace: [...s.trace, { label: a.valid ? "Signature verified" : "Signature invalid", detail: a.valid ? "Signature is authentic and untampered" : "Signature verification failed", time: a.elapsed, tone: a.valid ? "success" : "accent" }] };
+    case "error": return { ...s, phase: "idle", pair: null, publicKeyText: null, secretKeyText: null, ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signatureHex: null, signatureValid: null, times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null }, error: a.value, trace: [] };
+  }
 }
 
-export function Demo(){
- const [s,d]=useReducer(reducer,initial); const [copied,setCopied]=useState(false); const [copyError,setCopyError]=useState(false); const [installTab,setInstallTab]=useState<"pnpm"|"npm"|"yarn">("npm"); const operationLock=useRef(false); const executionSnapshot=useRef<string|null>(null); const installTabsRef=useRef<HTMLDivElement>(null);
- const busy=s.phase!=="idle"; const total=useMemo(()=>Object.values(s.times).reduce<number>((a,b)=>a+(b??0),0),[s.times]); const max=Math.max(...Object.values(s.times).map(x=>x??0),1);
- function beginOperation(){if(operationLock.current)return false;operationLock.current=true;return true}
- async function generateKeys(pqc:typeof import("@pqc-sdk/core").pqc,algorithm:Algorithm,traceStart:number){d({type:"phase",value:"generating"});const t=performance.now();const pair=await generatePair(pqc,algorithm);const now=performance.now();d({type:"keys",pair,publicKeyText:pqc.keys.serialize(pair.publicKey),secretKeyText:pqc.keys.serialize(pair.secretKey),duration:now-t,elapsed:now-traceStart});return pair}
- async function encryptMessage(pqc:typeof import("@pqc-sdk/core").pqc,message:string,pair:KemPair,traceStart:number){d({type:"phase",value:"encrypting"});const t=performance.now();const value=await pqc.encrypt(message,pair.publicKey);const now=performance.now();d({type:"encrypted",value,duration:now-t,elapsed:now-traceStart});return value}
- async function decryptMessage(pqc:typeof import("@pqc-sdk/core").pqc,ciphertext:Uint8Array,pair:KemPair,messageSnapshot:string|null,traceStart:number){d({type:"phase",value:"decrypting"});const t=performance.now();const value=await pqc.decrypt(ciphertext,pair.secretKey);const now=performance.now();const plaintext=new TextDecoder().decode(value);d({type:"decrypted",value:plaintext,plaintextSize:value.byteLength,duration:now-t,elapsed:now-traceStart,verified:messageSnapshot!==null&&plaintext===messageSnapshot});return plaintext}
- async function generate(){if(!beginOperation())return;executionSnapshot.current=null;try{const {pqc}=await import("@pqc-sdk/core");await generateKeys(pqc,s.algorithm,performance.now())}catch{d({type:"error",value:"The cryptographic module could not initialize. Try a current browser and run again."})}finally{operationLock.current=false}}
- async function encrypt(){if(!s.pair||!s.message.trim())return d({type:"error",value:"Enter a message before encrypting."});if(!beginOperation())return;const message=s.message;executionSnapshot.current=message;try{const {pqc}=await import("@pqc-sdk/core");await encryptMessage(pqc,message,s.pair,performance.now())}catch{d({type:"error",value:"Encryption failed. Reset the demo and try again."})}finally{operationLock.current=false}}
- async function decrypt(){if(!s.pair||!s.ciphertext||!beginOperation())return;try{const {pqc}=await import("@pqc-sdk/core");await decryptMessage(pqc,s.ciphertext,s.pair,executionSnapshot.current,performance.now())}catch{d({type:"error",value:"Decryption failed. Reset the demo and try again."})}finally{operationLock.current=false}}
- async function importArtifacts(publicKeyText:string,secretKeyText:string,ciphertextText:string){if(!beginOperation())return;executionSnapshot.current=null;try{const {pqc}=await import("@pqc-sdk/core");const publicKey=pqc.keys.deserialize(publicKeyText,{algorithm:s.algorithm,use:"public"});const secretKey=pqc.keys.deserialize(secretKeyText,{algorithm:s.algorithm,use:"secret"});if(publicKey.algorithm!==secretKey.algorithm)throw new Error("Key algorithms do not match.");const ciphertext=ciphertextText.trim()?fromHex(ciphertextText):null;d({type:"import",pair:{publicKey,secretKey} as KemPair,publicKeyText:pqc.keys.serialize(publicKey),secretKeyText:pqc.keys.serialize(secretKey),ciphertext})}catch{d({type:"error",value:"Import failed while loading artifacts. Check the key format, algorithm, and ciphertext hex, then try again."})}finally{operationLock.current=false}}
- async function runComplete(){const message=s.message;const algorithm=s.algorithm;if(!message.trim())return d({type:"error",value:"Enter a message before running the demo."});if(!beginOperation())return;executionSnapshot.current=message;const traceStart=performance.now();try{const {pqc}=await import("@pqc-sdk/core");const pair=await generateKeys(pqc,algorithm,traceStart);const ciphertext=await encryptMessage(pqc,message,pair,traceStart);await decryptMessage(pqc,ciphertext,pair,message,traceStart)}catch{d({type:"error",value:"The demo could not complete. Reset it and try again."})}finally{operationLock.current=false}}
- async function copy(text:string){try{if(!navigator.clipboard)throw new Error("Clipboard API unavailable");await navigator.clipboard.writeText(text);setCopyError(false);setCopied(true);setTimeout(()=>setCopied(false),1500)}catch{setCopied(false);setCopyError(true)}}
- function handleInstallKeyDown(event:KeyboardEvent<HTMLButtonElement>,index:number){const tabs=["pnpm","npm","yarn"] as const;let next=index;if(event.key==="ArrowRight")next=(index+1)%tabs.length;if(event.key==="ArrowLeft")next=(index+tabs.length-1)%tabs.length;if(event.key==="Home")next=0;if(event.key==="End")next=tabs.length-1;if(next===index)return;event.preventDefault();setInstallTab(tabs[next]);installTabsRef.current?.querySelector<HTMLButtonElement>(`[data-install-tab="${tabs[next]}"]`)?.focus()}
- return <main><span className="sr-only" aria-live="polite">{copied?"Copied":copyError?"Unable to copy. Please try again.":""}</span><Header/>
- <section id="demo" className="grid-bg border-b line"><div className="mx-auto max-w-[1240px] px-5 py-8 lg:px-8 lg:py-10"><div className="workspace-shell"><div className="workspace-header"><div><p className="mono text-[10px] uppercase tracking-[.18em] text-[var(--accent)]">Browser-native cryptography</p><h1 className="mt-3 max-w-[680px] text-4xl font-semibold leading-[1.02] tracking-[-.055em] sm:text-5xl lg:text-6xl">Try post-quantum encryption. <span className="text-[var(--muted)]">Right in your browser.</span></h1><p className="mt-4 max-w-[560px] text-sm leading-6 text-[var(--muted)]">Generate keys, encrypt a message, decrypt it, and verify the result locally.</p></div><div className="workspace-status mono"><span className="status-mark" aria-hidden="true"/><span>{busy?s.phase.toUpperCase():s.verified?"VERIFIED":"READY"}</span><span className="text-[var(--faint)]">LOCAL SESSION</span></div><nav className="mobile-navigation" aria-label="Section navigation"><a href="#demo">Playground</a><a href="#install">Install</a><a href="#why-pqc">Why PQC</a><a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer">GitHub</a></nav></div><div className="workspace-grid"><div className="workspace-control"><div className="workspace-region-label">Control plane</div><Playground s={s} busy={busy} generate={generate} encrypt={encrypt} decrypt={decrypt} runComplete={runComplete} importArtifacts={importArtifacts}  onMessage={value=>d({type:"message",value})} onAlgorithm={value=>{executionSnapshot.current=null;d({type:"algorithm",value})}}/></div><div className="workspace-observe"><div className="workspace-region-label">Execution plane</div><CryptoViz phase={s.phase} verified={s.verified} sHasPair={!!s.pair} sHasCipher={!!s.ciphertext} times={s.times}/></div></div></div></div></section>
- <TrustPanel />
- <section className="border-y bg-[#0f1215] py-24 line"><div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8"><div><h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">The API stays small.</h2><p className="mt-4 max-w-[370px] text-sm leading-6 text-[var(--muted)]">A few readable calls connect the complete encryption flow.</p></div><div className="overflow-hidden rounded-xl border bg-[#0b0d0f] line"><div className="flex justify-between border-b px-4 py-3 line"><span className="mono text-[10px] text-[var(--faint)]">quickstart.ts</span><button onClick={()=>copy(code)} className="mono text-[11px] text-[var(--accent)]">{copied?"Copied":"Copy code"}</button></div><pre className="overflow-x-auto p-5 text-[12px] leading-7 text-[#c5d0da]"><code>{code}</code></pre></div></div></section>
- <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-32"><h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Real work, measured locally.</h2><p className="mt-3 text-sm text-[var(--muted)]">A timing trace from this browser session.</p><div className="mt-10 grid gap-4 lg:grid-cols-[.8fr_1.2fr]"><div className="rounded-xl border bg-[var(--surface)] p-6 line"><p className="mono text-[10px] text-[var(--faint)]">TOTAL EXECUTION</p><p className="metric-value mt-5 text-5xl font-semibold tracking-[-.06em]">{total?<AnimatedNumber value={total} suffix=" ms"/>:"Waiting"}</p><p className="mt-3 text-sm leading-6 text-[var(--muted)]">Results vary by browser, device and workload.</p></div><div className="rounded-xl border bg-[var(--surface)] p-6 line">{[["Key generation",s.times.key,"Creates the post-quantum key pair"],["Encryption",s.times.encrypt,"Seals the message with the public key"],["Decryption",s.times.decrypt,"Recovers the message with the secret key"]].map(([label,value,desc])=><div key={label as string} className="border-b py-4 first:pt-0 last:border-0 line"><div className="flex justify-between text-sm"><span>{label}</span><span className="mono text-xs text-[var(--accent)]">{ms(value as number|null)}</span></div><div className="mt-3 h-1 bg-[#283038]"><div className="h-full bg-[var(--accent)]" style={{width:value?`${Math.max(5,(value as number/max)*100)}%`:"0%"}}/></div><p className="mt-2 text-xs text-[var(--muted)]">{desc}</p></div>)}</div></div></section>
- <section id="install" className="border-y bg-[#0f1215] py-24 line"><div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8"><div><h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Install the SDK.</h2><p className="mt-4 text-sm text-[var(--muted)]">Add browser-ready post-quantum encryption to a TypeScript project.</p><div className="mt-7 flex flex-wrap gap-5 text-sm text-[var(--accent)]"><a href="https://jeloercc.github.io/pqc-sdk/" target="_blank" rel="noreferrer">View Documentation</a><a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer">Quick Start</a></div></div><div><div ref={installTabsRef} role="tablist" aria-label="Package manager" className="mb-3 flex gap-5 border-b line"><button id="install-tab-pnpm" role="tab" aria-selected={installTab==="pnpm"} aria-controls="install-panel-pnpm" tabIndex={installTab==="pnpm"?0:-1} data-install-tab="pnpm" onClick={()=>setInstallTab("pnpm")} onKeyDown={event=>handleInstallKeyDown(event,0)} className={`pb-3 text-xs ${installTab==="pnpm"?"border-b-2 border-[var(--accent)] text-[var(--text)]":"text-[var(--muted)]"}`}>pnpm</button><button id="install-tab-npm" role="tab" aria-selected={installTab==="npm"} aria-controls="install-panel-npm" tabIndex={installTab==="npm"?0:-1} data-install-tab="npm" onClick={()=>setInstallTab("npm")} onKeyDown={event=>handleInstallKeyDown(event,1)} className={`pb-3 text-xs ${installTab==="npm"?"border-b-2 border-[var(--accent)] text-[var(--text)]":"text-[var(--muted)]"}`}>npm</button><button id="install-tab-yarn" role="tab" aria-selected={installTab==="yarn"} aria-controls="install-panel-yarn" tabIndex={installTab==="yarn"?0:-1} data-install-tab="yarn" onClick={()=>setInstallTab("yarn")} onKeyDown={event=>handleInstallKeyDown(event,2)} className={`pb-3 text-xs ${installTab==="yarn"?"border-b-2 border-[var(--accent)] text-[var(--text)]":"text-[var(--muted)]"}`}>yarn</button> </div><div id="install-panel-pnpm" role="tabpanel" aria-labelledby="install-tab-pnpm" hidden={installTab!=="pnpm"} className="mono flex justify-between rounded-lg border bg-[var(--surface)] px-4 py-4 text-xs line"><span><span className="mr-3 text-[var(--faint)]">$</span>pnpm add @pqc-sdk/core</span><button onClick={()=>copy("pnpm add @pqc-sdk/core")} className="text-[var(--accent)]">{copied?"Copied":"Copy"}</button></div><div id="install-panel-npm" role="tabpanel" aria-labelledby="install-tab-npm" hidden={installTab!=="npm"} className="mono flex justify-between rounded-lg border bg-[var(--surface)] px-4 py-4 text-xs line"><span><span className="mr-3 text-[var(--faint)]">$</span>npm install @pqc-sdk/core</span><button onClick={()=>copy("npm install @pqc-sdk/core")} className="text-[var(--accent)]">{copied?"Copied":"Copy"}</button></div><div id="install-panel-yarn" role="tabpanel" aria-labelledby="install-tab-yarn" hidden={installTab!=="yarn"} className="mono flex justify-between rounded-lg border bg-[var(--surface)] px-4 py-4 text-xs line"><span><span className="mr-3 text-[var(--faint)]">$</span>yarn add @pqc-sdk/core</span><button onClick={()=>copy("yarn add @pqc-sdk/core")} className="text-[var(--accent)]">{copied?"Copied":"Copy"}</button> </div></div></div></section>
- <section id="why-pqc" className="mx-auto grid max-w-[1240px] gap-10 px-5 py-24 lg:grid-cols-[1.2fr_.8fr] lg:px-8 lg:py-32"><h2 className="max-w-[720px] text-4xl font-semibold leading-[1.05] tracking-[-.05em] sm:text-6xl">Encrypted traffic can be stored today and targeted later.</h2><p className="self-end border-l-2 border-[var(--accent)] pl-5 text-sm leading-7 text-[var(--muted)]">Post-quantum cryptography is designed to help protect against the risk of future large-scale quantum computers.</p></section>
- <section className="border-t bg-[var(--surface)] py-24 line"><div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.8fr_1.2fr] lg:px-8"><div><h2 className="text-4xl font-semibold tracking-[-.05em] sm:text-6xl">Built in the open.</h2><p className="mt-5 max-w-[500px] text-sm leading-6 text-[var(--muted)]">Explore the implementation and install the package from its primary sources.</p><a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer" className="mt-7 inline-flex rounded-lg bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-[#0b0d0f]">View on GitHub</a></div><div className="grid gap-3 sm:grid-cols-2"><a href="https://github.com/jeloercc/pqc-sdk/blob/main/LICENSE" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">MIT License</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">License</span></a><a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Documentation</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Quick start</span></a><a href="https://jeloercc.github.io/pqc-sdk/api/" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">API Reference</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">API</span></a><a href="https://www.npmjs.com/package/@pqc-sdk/core" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">npm package</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">@pqc-sdk/core</span></a></div></div></section><footer className="mx-auto flex max-w-[1240px] flex-col gap-3 px-5 py-8 text-xs text-[var(--faint)] sm:flex-row sm:justify-between lg:px-8"><span className="mono">PQC SDK / Open source cryptography</span><span>MIT License. Keys stay in memory and leave with this page.</span></footer></main>
+const ms = (n: number | null) => (n === null ? "Waiting" : `${n.toFixed(1)} ms`);
+
+const codeEncrypt = `import { pqc } from '@pqc-sdk/core';
+
+// ── Hybrid encryption (X-Wing default) ──────────
+const pair = await pqc.keys.generate(); // X-Wing
+const ciphertext = await pqc.encrypt('secret', pair.publicKey);
+const plaintext = await pqc.decrypt(ciphertext, pair.secretKey);
+
+// ── Digital signatures (ML-DSA-65) ──────────────
+const signer = await pqc.keys.generate({ algorithm: 'ml-dsa-65' });
+const signature = await pqc.sign('document', signer.secretKey);
+const valid = await pqc.verify('document', signature, signer.publicKey);`;
+
+async function generateKemPair(pqc: typeof import("@pqc-sdk/core").pqc, algorithm: KemAlgorithm): Promise<KemPair> {
+  return pqc.keys.generate({ algorithm });
 }
-function CryptoViz({phase,verified,sHasPair,sHasCipher,times}:{phase:Phase;verified:boolean;sHasPair:boolean;sHasCipher:boolean;times:State["times"]}){
- const state=verified?"trust":phase==="generating"?"commitment":phase==="encrypting"?"challenge":phase==="decrypting"?"response":sHasCipher?"challenge":sHasPair?"commitment":"entropy";
- const cells=Array.from({length:96},(_,index)=>{const row=Math.floor(index/16);const col=index%16;const edge=row===1||row===6||col===1||col===14;const core=(row>=2&&row<=5&&col>=4&&col<=11);const diagonal=(row===col-2||row===7-col);return <span key={index} className={`crypto-pixel crypto-${state} ${edge?"crypto-edge":""} ${core?"crypto-core":""} ${diagonal?"crypto-diagonal":""}`} style={{"--i":index,"--row":row,"--col":col,"--phase-delay":`${(index%12)*55}ms`} as React.CSSProperties}/>});
- const labels=state==="trust"?["ENTROPY","COMMITMENT","CHALLENGE","RESPONSE","VERIFIED"]:state==="entropy"?["ENTROPY","TRANSCRIPT READY"]:state==="commitment"?["ENTROPY","COMMITMENT"]:state==="challenge"?["ENTROPY","COMMITMENT","CHALLENGE"]:["ENTROPY","COMMITMENT","CHALLENGE","RESPONSE"];
- const operation=phase==="generating"?{label:"Generate keys",description:"Creating a post-quantum key pair",time:times.key}:phase==="encrypting"?{label:"Encrypt message",description:"Sealing the message with the public key",time:times.encrypt}:phase==="decrypting"?{label:"Decrypt message",description:"Recovering plaintext with the secret key",time:times.decrypt}:verified?{label:"Verification complete",description:"Plaintext matches the original message",time:times.decrypt}:sHasCipher?{label:"Ciphertext ready",description:"Encrypted bytes are ready to decrypt",time:times.encrypt}:sHasPair?{label:"Key pair ready",description:"Public and secret keys are available",time:times.key}:{label:"Waiting for input",description:"Run the workflow to create a transcript",time:null};
- const execution=phase!=="idle"?"Running":verified?"Complete":sHasCipher?"Ready":sHasPair?"Ready":"Idle";
- return <div className={`crypto-visual crypto-state-${state}`} aria-describedby="crypto-execution-live"><div className="crypto-visual-head"><span className="mono">TRANSCRIPT ENGINE</span><span className="mono">{state.toUpperCase()}</span></div><div className="crypto-stage" aria-hidden="true"><div className="crypto-path crypto-path-a"/><div className="crypto-path crypto-path-b"/><div className="crypto-path crypto-path-c"/><div className="crypto-node crypto-node-a"/><div className="crypto-node crypto-node-b"/><div className="crypto-node crypto-node-c"/><div className="crypto-lattice">{cells}</div></div><div className="crypto-transcript" aria-label="Cryptographic phases">{labels.map((label,index)=><span key={label} className={index<labels.length-1?"transcript-done":"transcript-current"}>{label}</span>)}</div><div className="crypto-observation"><div><span className="mono text-[10px] text-[var(--faint)]">ACTIVE OPERATION</span><strong>{operation.label}</strong><span>{operation.description}</span></div><div className="crypto-observation-meta"><span className="mono text-[10px] text-[var(--faint)]">ELAPSED</span><strong>{ms(operation.time)}</strong><span className={`mono text-[10px] ${verified?"text-[var(--success)]":"text-[var(--accent)]"}`}>{execution.toUpperCase()}</span></div></div><div id="crypto-execution-live" className="sr-only" role="status" aria-live="polite" aria-atomic="true">Cryptographic transcript: {labels.join(", ")}. Active operation: {operation.label}. {operation.description}. Execution state: {execution}. Elapsed time: {ms(operation.time)}.</div></div>}
-function Header(){return <header className="site-header mx-auto flex min-h-[72px] max-w-[1240px] flex-wrap items-center justify-between gap-3 border-b px-5 line lg:px-8"><a href="#" className="flex items-center gap-3 text-sm font-semibold"><span className="mono text-[var(--accent)]">[pqc]</span>PQC SDK</a><nav className="hidden gap-8 text-sm text-[var(--muted)] sm:flex"><a href="#demo">Demo</a><a href="#install">Install</a><a href="#why-pqc">Why PQC</a><a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer">GitHub</a></nav><a href="#demo" className="rounded-lg border px-3 py-2 text-xs text-[var(--accent)] line">Run the Demo</a></header>}
-function TrustPanel(){return <section className="border-b py-6 line"><div className="mx-auto grid max-w-[1240px] gap-4 px-5 sm:grid-cols-2 lg:grid-cols-4 lg:px-8"><a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line"><span className="block font-medium">Open Source</span><span className="mt-1 block text-xs text-[var(--muted)]">Repository</span></a><a href="https://github.com/jeloercc/pqc-sdk/blob/main/LICENSE" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line"><span className="block font-medium">MIT Licensed</span><span className="mt-1 block text-xs text-[var(--muted)]">License</span></a><a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line"><span className="block font-medium">Browser Native</span><span className="mt-1 block text-xs text-[var(--muted)]">Documentation</span></a><a href="https://www.npmjs.com/package/@pqc-sdk/core" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line"><span className="block font-medium">TypeScript First</span><span className="mt-1 block text-xs text-[var(--muted)]">Package</span></a></div></section>}
-function Playground({s,busy,generate,encrypt,decrypt,runComplete,importArtifacts,onMessage,onAlgorithm}:{s:State;busy:boolean;generate:()=>void;encrypt:()=>void;decrypt:()=>void;runComplete:()=>void;importArtifacts:(publicKey:string,secretKey:string,ciphertext:string)=>void;onMessage:(value:string)=>void;onAlgorithm:(value:Algorithm)=>void}){return <div aria-busy={busy} className="workspace-playground"><div className="flex justify-between border-b pb-4 line"><span className="mono text-[10px] text-[var(--faint)]">pqc playground</span><span role="status" aria-live="polite" className={`mono text-[10px] ${s.verified?"text-[var(--success)]":"text-[var(--accent)]"}`}>{busy?s.phase.toUpperCase():s.verified?"VERIFIED":"READY"}</span></div><label className="mono mt-5 block text-[11px] uppercase tracking-[.15em] text-[var(--muted)]" htmlFor="hero-message">Message</label><textarea id="hero-message" maxLength={2000} value={s.message} disabled={busy} onChange={e=>onMessage(e.target.value)} className="mt-3 min-h-[92px] w-full resize-y rounded-lg border bg-[#0d1012] p-3 text-sm leading-6 outline-none line focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"/><div className="mt-4 grid gap-2 sm:grid-cols-2"><Algo active={s.algorithm==="ml-kem-768"} onClick={()=>onAlgorithm("ml-kem-768")} title="ML-KEM-768" detail="SDK default" disabled={busy}/><Algo active={s.algorithm==="x-wing"} onClick={()=>onAlgorithm("x-wing")} title="X-Wing hybrid" detail="Advanced mode" disabled={busy}/></div><button onClick={runComplete} disabled={busy} className="mt-4 w-full rounded-lg bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-[#0b0d0f] transition-colors hover:bg-white active:scale-[.98] disabled:cursor-wait disabled:opacity-60">{busy?"Processing...":"Run complete demo"}</button><div className="mt-4 space-y-3"><Mini title="Generate Keys" operation="generating" active={s.phase==="generating"} time={s.times.key} done={!!s.pair} run={generate} disabled={busy}/><Mini title="Encrypt Message" operation="encrypting" active={s.phase==="encrypting"} time={s.times.encrypt} done={!!s.ciphertext} run={encrypt} disabled={busy||!s.pair}/><Mini title="Decrypt Message" operation="decrypting" active={s.phase==="decrypting"} time={s.times.decrypt} done={!!s.plaintext} run={decrypt} disabled={busy||!s.ciphertext}/></div>{s.error&&<p role="alert" aria-live="assertive" className="mt-4 rounded-lg border border-[var(--danger)]/40 p-3 text-xs text-[var(--danger)]">{s.error}</p>}{s.plaintext&&<><p role="status" aria-live="polite" className={`mt-4 rounded-lg border p-3 text-xs line ${s.verified?"success-pop bg-[#8bd6ae0d] text-[var(--success)]":"verification-failed border-[var(--danger)]/50 bg-[#f294940d] text-[var(--danger)]"}`}>{s.verified?"✓ Messages match":"Decrypted, but verification failed"}{!s.verified&&<span className="mt-1 block text-[var(--muted)]">The plaintext does not match the message captured when this ciphertext was created.</span>}</p><div className="result-metrics mt-4 grid grid-cols-3 gap-3 pt-4"><Metric label="Keys" value={s.times.key}/><Metric label="Encrypt" value={s.times.encrypt}/><Metric label="Decrypt" value={s.times.decrypt}/></div><ExecutionDetails s={s}/></>}<ArtifactWorkbench s={s} importArtifacts={importArtifacts}/><div className="mono mt-5 text-[10px] text-[var(--faint)]">NO SERVER REQUESTS / EPHEMERAL KEYS</div></div>}
-function Mini({title,operation,time,active,done,run,disabled}:{title:string;operation:Phase;time:number|null;active:boolean;done:boolean;run:()=>void;disabled:boolean}){const verb=operation==="generating"?"Generate":operation==="encrypting"?"Encrypt":"Decrypt";const present=operation==="generating"?"Generating":operation==="encrypting"?"Encrypting":"Decrypting";const past=operation==="generating"?"Generated":operation==="encrypting"?"Encrypted":"Decrypted";return <div className={`operation-row flex items-center gap-3 rounded-lg border p-4 line ${done?"operation-done":""}`}><span className={`mono text-[10px] ${done?"text-[var(--success)]":active?"text-[var(--accent)]":"text-[var(--faint)]"}`}>{done?"OK":active?"...":"--"}</span><span className="flex-1 text-sm"><span className="block">{active?`${present}...`:title}</span>{done&&<span className="mono mt-1 block text-[10px] text-[var(--success)]">{past} in {ms(time)}</span>}</span><button onClick={run} disabled={disabled} className="rounded-md border px-3 py-2 text-xs transition-colors hover:border-[var(--accent)] active:scale-[.98]">{done?"Run again":verb}</button></div>}
-function Algo({active,onClick,title,detail,disabled}:{active:boolean;onClick:()=>void;title:string;detail:string;disabled:boolean}){return <button type="button" aria-pressed={active} disabled={disabled} onClick={onClick} className={`rounded-lg border p-3 text-left line disabled:cursor-not-allowed disabled:opacity-60 ${active?"border-[var(--accent)] bg-[#78b8ff12]":""}`}><span className="block text-xs">{title}</span><span className="mono mt-1 block text-[10px] text-[var(--muted)]">{detail}</span></button>}
-function AnimatedNumber({value,suffix=""}:{value:number;suffix?:string}){const [display,setDisplay]=useState(0);useEffect(()=>{if(window.matchMedia("(prefers-reduced-motion: reduce)").matches){setDisplay(value);return}const start=performance.now();const duration=500;let frame=0;const tick=(now:number)=>{const progress=Math.min((now-start)/duration,1);setDisplay(value*progress);if(progress<1)frame=requestAnimationFrame(tick)};frame=requestAnimationFrame(tick);return()=>cancelAnimationFrame(frame)},[value]);return <>{display.toFixed(1)}{suffix}</>}
-function Metric({label,value}:{label:string;value:number|null}){return <div><p className="mono text-[10px] text-[var(--faint)]">{label}</p><p className="metric-value mt-2 text-xs">{value===null?"Waiting":<AnimatedNumber value={value} suffix=" ms"/>}</p></div>}
-function ArtifactWorkbench({s,importArtifacts}:{s:State;importArtifacts:(publicKey:string,secretKey:string,ciphertext:string)=>void}){const [secretVisible,setSecretVisible]=useState(false);const [publicInput,setPublicInput]=useState("");const [secretInput,setSecretInput]=useState("");const [cipherInput,setCipherInput]=useState("");const [notice,setNotice]=useState("");async function copy(value:string){try{await navigator.clipboard.writeText(value);setNotice("Copied to clipboard")}catch{setNotice("Clipboard unavailable; use download instead")}}function download(name:string,value:string){const url=URL.createObjectURL(new Blob([value],{type:"text/plain"}));const link=document.createElement("a");link.href=url;link.download=name;link.click();URL.revokeObjectURL(url);setNotice(`Downloaded ${name}`)}const publicValue=s.publicKeyText??"";const secretValue=s.secretKeyText??"";const cipherValue=s.ciphertext?hex(s.ciphertext):"";const summary=`Algorithm: ${s.algorithm === "x-wing" ? "X-Wing" : "ML-KEM-768"}\nPublic Key Size: ${s.pair?.publicKey.bytes.byteLength ?? "Waiting"} bytes\nSecret Key Size: ${s.pair?.secretKey.bytes.byteLength ?? "Waiting"} bytes\nCiphertext Size: ${s.ciphertext?.byteLength ?? "Waiting"} bytes\nPlaintext Length: ${s.plaintextSize ?? "Waiting"} bytes\nVerification: ${s.verified ? "Byte-for-byte match" : "Not verified"}\nKey Generation: ${ms(s.times.key)}\nEncryption: ${ms(s.times.encrypt)}\nDecryption: ${ms(s.times.decrypt)}`;return <section className="inspection-plane" aria-label="Cryptographic workbench"><div className="inspection-header"><div><span className="workspace-region-label">Inspection plane</span><h2>Artifacts and import</h2></div><span role="status" aria-live="polite" className="mono text-[10px] text-[var(--faint)]">{notice}</span></div><div className="inspection-toolbar"><span className="text-xs text-[var(--muted)]">Serialized material from this session</span><button type="button" onClick={()=>copy(summary)} className="text-xs text-[var(--accent)] transition-colors hover:text-[var(--text)]">Copy technical summary</button></div><div className="artifact-stack"><ArtifactPanel title="Public key" value={publicValue} bytes={s.pair?.publicKey.bytes.byteLength??null} encoding="PQC serialized / Base64URL" onCopy={copy} onDownload={download}/><ArtifactPanel title="Secret key" value={secretValue} bytes={s.pair?.secretKey.bytes.byteLength??null} encoding="PQC serialized / Base64URL" hidden={!secretVisible} onCopy={copy} onDownload={download} toggle={()=>setSecretVisible(!secretVisible)} visible={secretVisible}/><ArtifactPanel title="Ciphertext" value={cipherValue} bytes={s.ciphertext?.byteLength??null} encoding="Hexadecimal" onCopy={copy} onDownload={download}/></div><p className="inspection-warning">Demo only. Never share secret keys in production.</p><details className="details-panel import-panel"><summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Import artifacts <span className="mono float-right text-[10px] text-[var(--faint)]">serialized keys + hex</span></summary><div className="space-y-3 border-t px-4 py-4 line"><ImportField label="Public key" value={publicInput} onChange={setPublicInput} placeholder="pqcv1...."/><ImportField label="Secret key" value={secretInput} onChange={setSecretInput} placeholder="pqcv1...."/><ImportField label="Ciphertext (optional hex)" value={cipherInput} onChange={setCipherInput} placeholder="01ab..."/><button type="button" onClick={()=>importArtifacts(publicInput,secretInput,cipherInput)} disabled={!publicInput.trim()||!secretInput.trim()} className="rounded-md bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-[#0b0d0f] disabled:cursor-not-allowed disabled:opacity-50">Load artifacts</button></div></details></section>}
-function ArtifactPanel({title,value,bytes,encoding,onCopy,onDownload,hidden,toggle,visible}:{title:string;value:string;bytes:number|null;encoding:string;onCopy:(value:string)=>void;onDownload:(name:string,value:string)=>void;hidden?:boolean;toggle?:()=>void;visible?:boolean}){const valueId=`artifact-${title.toLowerCase().replace(/\s+/g,"-")}-value`;const empty=title==="Ciphertext"?"Encrypt a message to create ciphertext":"Generate keys to inspect this artifact";const display=hidden?"Secret key hidden":value?value:empty;return <div className="artifact-surface"><div className="artifact-heading"><div><p className="text-sm font-medium">{title}</p><p className="mono mt-1 text-[10px] text-[var(--muted)]">{encoding}</p></div><div className="artifact-meta"><span className="mono text-[10px]">{bytes===null?"Waiting":`${bytes} bytes`}</span>{toggle&&<button type="button" onClick={toggle} aria-expanded={visible} aria-controls={valueId} className="artifact-reveal">{visible?"Hide":"Reveal"}</button>}</div></div><p id={valueId} className={`mono artifact-value ${!value?"artifact-empty":""}`} aria-label={`${title} value`}>{display}</p><div className="artifact-actions"><button type="button" onClick={()=>onCopy(value)} disabled={!value||hidden} className="artifact-action-primary">Copy value</button><button type="button" onClick={()=>onDownload(`${title.toLowerCase().replace(" ","-")}.txt`,value)} disabled={!value||hidden} className="artifact-action-secondary">Download</button></div></div>}
-function ImportField({label,value,onChange,placeholder}:{label:string;value:string;onChange:(value:string)=>void;placeholder:string}){return <label className="block"><span className="mono text-[10px] text-[var(--muted)]">{label}</span><textarea value={value} onChange={event=>onChange(event.target.value)} placeholder={placeholder} rows={2} className="mt-1 w-full resize-y rounded-md border bg-[#0d1012] p-2 text-[10px] leading-5 outline-none line focus:border-[var(--accent)]"/></label>}
-function ExecutionDetails({s}:{s:State}){const [detailsOpen,setDetailsOpen]=useState(false);const [artifactsOpen,setArtifactsOpen]=useState(false);useEffect(()=>{if(s.verified){setDetailsOpen(true);setArtifactsOpen(true)}},[s.verified]);if(!s.pair||!s.ciphertext)return null;return <><details open={detailsOpen} onToggle={event=>setDetailsOpen(event.currentTarget.open)} className="details-panel mt-4 rounded-lg border line"><summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Execution details <span className="mono float-right text-[10px] text-[var(--faint)]">metadata only</span></summary><div className="grid gap-x-5 gap-y-4 border-t px-4 py-4 sm:grid-cols-2 line"><Detail label="Algorithm" value={s.algorithm}/><Detail label="Public key size" value={`${s.pair.publicKey.bytes.byteLength} bytes`}/><Detail label="Secret key size" value={`${s.pair.secretKey.bytes.byteLength} bytes`}/><Detail label="Ciphertext size" value={`${s.ciphertext.byteLength} bytes`}/><Detail label="Plaintext size" value={s.plaintextSize===null?"Waiting":`${s.plaintextSize} bytes`}/><Detail label="Verification status" value={s.verified?"Messages match":"Not verified"} success={s.verified}/></div></details><details open={artifactsOpen} onToggle={event=>setArtifactsOpen(event.currentTarget.open)} className="details-panel mt-3 rounded-lg border line"><summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Cryptographic artifacts <span className="mono float-right text-[10px] text-[var(--faint)]">previews only</span></summary><div className="space-y-4 border-t px-4 py-4 line"><Detail label="Ciphertext preview" value={hexPreview(s.ciphertext)}/><Detail label="Plaintext preview" value={s.plaintext?preview(s.plaintext):"Waiting"}/><Detail label="Verification result" value={s.verified?"✓ Messages Match":"Not verified"} success={s.verified}/></div></details><Trace events={s.trace}/></>}
-function Detail({label,value,success}:{label:string;value:string;success?:boolean}){return <div className="min-w-0"><p className="mono text-[10px] text-[var(--faint)]">{label}</p><p className={`mt-1 truncate text-xs ${success?"text-[var(--success)]":""}`}>{value}</p></div>}
-function preview(value:string){const compact=value.replace(/\s+/g," ").trim();return compact.length>48?`${compact.slice(0,48)}…`:compact}
-function hex(value:Uint8Array){return Array.from(value).map(byte=>byte.toString(16).padStart(2,"0")).join("")}
-function fromHex(value:string){const clean=value.replace(/\s+/g,"");if(!/^(?:[0-9a-fA-F]{2})*$/.test(clean))throw new Error("Invalid hexadecimal ciphertext.");const result=new Uint8Array(clean.length/2);for(let i=0;i<result.length;i++)result[i]=Number.parseInt(clean.slice(i*2,i*2+2),16);return result}
-function hexPreview(value:Uint8Array){const bytes=hex(value).slice(0,36);return `${bytes}...`}
-function previewLong(value:string){return value.length>112?`${value.slice(0,112)}…`:value}
-function Trace({events}:{events:TraceEvent[]}){return <div className="trace-panel mt-4 border-t pt-4 line"><div className="mb-3 flex items-center justify-between"><span className="mono text-[10px] uppercase tracking-[.15em] text-[var(--muted)]">Execution trace</span><span className="mono text-[10px] text-[var(--faint)]">{events.length} events</span></div><div className="space-y-3">{events.map((event,index)=><div key={`${event.label}-${index}`} className="trace-event flex gap-3"><span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${event.tone==="success"?"bg-[var(--success)]":"bg-[var(--accent)]"}`}/><div className="min-w-0 flex-1"><div className="flex flex-wrap justify-between gap-x-3 text-xs"><span>{event.label}</span><span className="mono text-[10px] text-[var(--accent)]">[{event.time.toFixed(1)} ms]</span></div><p className="mt-1 text-[10px] text-[var(--muted)]">{event.detail}</p></div></div>)}</div></div>}
+async function generateDsaPair(pqc: typeof import("@pqc-sdk/core").pqc, algorithm: SignatureAlgorithm): Promise<DsaPair> {
+  return pqc.keys.generate({ algorithm });
+}
+
+// ── Demo component ────────────────────────────────────────────────────────────
+export function Demo() {
+  const [s, d] = useReducer(reducer, initial);
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  const [installTab, setInstallTab] = useState<"npm" | "pnpm" | "yarn" | "mcp">("npm");
+  const operationLock = useRef(false);
+  const executionSnapshot = useRef<string | null>(null);
+  const installTabsRef = useRef<HTMLDivElement>(null);
+
+  const busy = s.phase !== "idle";
+  const isEncryptMode = s.mode === "encrypt";
+  const isSignMode = s.mode === "sign";
+  const succeedState = isEncryptMode ? s.verified : s.signatureValid === true;
+  const total = useMemo(() => Object.values(s.times).reduce<number>((a, b) => a + (b ?? 0), 0), [s.times]);
+  const max = Math.max(...Object.values(s.times).map((x) => x ?? 0), 1);
+
+  function beginOperation() { if (operationLock.current) return false; operationLock.current = true; return true; }
+
+  // ── KEM helpers ─────────────────────────────────────────────────────────────
+  async function generateKemKeys(pqc: typeof import("@pqc-sdk/core").pqc, algorithm: KemAlgorithm, traceStart: number) {
+    d({ type: "phase", value: "generating" });
+    const t = performance.now();
+    const pair = await generateKemPair(pqc, algorithm);
+    const now = performance.now();
+    d({ type: "keys", pair, publicKeyText: pqc.keys.serialize(pair.publicKey), secretKeyText: pqc.keys.serialize(pair.secretKey), duration: now - t, elapsed: now - traceStart });
+    return pair;
+  }
+  async function generateDsaKeys(pqc: typeof import("@pqc-sdk/core").pqc, algorithm: SignatureAlgorithm, traceStart: number) {
+    d({ type: "phase", value: "generating" });
+    const t = performance.now();
+    const pair = await generateDsaPair(pqc, algorithm);
+    const now = performance.now();
+    d({ type: "keys", pair, publicKeyText: pqc.keys.serialize(pair.publicKey), secretKeyText: pqc.keys.serialize(pair.secretKey), duration: now - t, elapsed: now - traceStart });
+    return pair;
+  }
+  async function encryptMessage(pqc: typeof import("@pqc-sdk/core").pqc, message: string, pair: KemPair, traceStart: number) {
+    d({ type: "phase", value: "encrypting" });
+    const t = performance.now();
+    const value = await pqc.encrypt(message, pair.publicKey);
+    const now = performance.now();
+    d({ type: "encrypted", value, duration: now - t, elapsed: now - traceStart });
+    return value;
+  }
+  async function decryptMessage(pqc: typeof import("@pqc-sdk/core").pqc, ciphertext: Uint8Array, pair: KemPair, messageSnapshot: string | null, traceStart: number) {
+    d({ type: "phase", value: "decrypting" });
+    const t = performance.now();
+    const value = await pqc.decrypt(ciphertext, pair.secretKey);
+    const now = performance.now();
+    const plaintext = new TextDecoder().decode(value);
+    d({ type: "decrypted", value: plaintext, plaintextSize: value.byteLength, duration: now - t, elapsed: now - traceStart, verified: messageSnapshot !== null && plaintext === messageSnapshot });
+    return plaintext;
+  }
+  async function signMessage(pqc: typeof import("@pqc-sdk/core").pqc, message: string, pair: DsaPair, traceStart: number) {
+    d({ type: "phase", value: "signing" });
+    const t = performance.now();
+    const sig = await pqc.sign(message, pair.secretKey);
+    const now = performance.now();
+    const signatureHex = hex(sig);
+    d({ type: "signed", signatureHex, duration: now - t, elapsed: now - traceStart });
+    return { sig, signatureHex };
+  }
+  async function verifyMessage(pqc: typeof import("@pqc-sdk/core").pqc, message: string, sig: Uint8Array, pair: DsaPair, traceStart: number) {
+    d({ type: "phase", value: "verifying" });
+    const t = performance.now();
+    const valid = await pqc.verify(message, sig, pair.publicKey);
+    const now = performance.now();
+    d({ type: "verified", valid, duration: now - t, elapsed: now - traceStart });
+    return valid;
+  }
+
+  // ── Orchestrated operations ──────────────────────────────────────────────────
+  async function generate() {
+    if (!beginOperation()) return;
+    executionSnapshot.current = null;
+    try {
+      const { pqc } = await import("@pqc-sdk/core");
+      if (isEncryptMode) await generateKemKeys(pqc, s.algorithm as KemAlgorithm, performance.now());
+      else await generateDsaKeys(pqc, s.algorithm as SignatureAlgorithm, performance.now());
+    } catch { d({ type: "error", value: "The cryptographic module could not initialize. Try a current browser and run again." }); }
+    finally { operationLock.current = false; }
+  }
+  async function encrypt() {
+    if (!s.pair || !s.message.trim()) return d({ type: "error", value: "Enter a message before encrypting." });
+    if (!beginOperation()) return;
+    const message = s.message;
+    executionSnapshot.current = message;
+    try {
+      const { pqc } = await import("@pqc-sdk/core");
+      await encryptMessage(pqc, message, s.pair as KemPair, performance.now());
+    } catch { d({ type: "error", value: "Encryption failed. Reset the demo and try again." }); }
+    finally { operationLock.current = false; }
+  }
+  async function decrypt() {
+    if (!s.pair || !s.ciphertext || !beginOperation()) return;
+    try {
+      const { pqc } = await import("@pqc-sdk/core");
+      await decryptMessage(pqc, s.ciphertext, s.pair as KemPair, executionSnapshot.current, performance.now());
+    } catch { d({ type: "error", value: "Decryption failed. Reset the demo and try again." }); }
+    finally { operationLock.current = false; }
+  }
+  async function sign() {
+    if (!s.pair || !s.message.trim()) return d({ type: "error", value: "Enter a message before signing." });
+    if (!beginOperation()) return;
+    executionSnapshot.current = s.message;
+    try {
+      const { pqc } = await import("@pqc-sdk/core");
+      await signMessage(pqc, s.message, s.pair as DsaPair, performance.now());
+    } catch { d({ type: "error", value: "Signing failed. Reset the demo and try again." }); }
+    finally { operationLock.current = false; }
+  }
+  async function verifySignature() {
+    if (!s.pair || !s.signatureHex || !beginOperation()) return;
+    try {
+      const { pqc } = await import("@pqc-sdk/core");
+      const sigBytes = fromHex(s.signatureHex);
+      await verifyMessage(pqc, s.message, sigBytes, s.pair as DsaPair, performance.now());
+    } catch { d({ type: "error", value: "Verification failed. Reset the demo and try again." }); }
+    finally { operationLock.current = false; }
+  }
+  async function runComplete() {
+    const message = s.message;
+    if (!message.trim()) return d({ type: "error", value: "Enter a message before running the demo." });
+    if (!beginOperation()) return;
+    executionSnapshot.current = message;
+    const traceStart = performance.now();
+    try {
+      const { pqc } = await import("@pqc-sdk/core");
+      if (isEncryptMode) {
+        const pair = await generateKemKeys(pqc, s.algorithm as KemAlgorithm, traceStart);
+        const ciphertext = await encryptMessage(pqc, message, pair, traceStart);
+        await decryptMessage(pqc, ciphertext, pair, message, traceStart);
+      } else {
+        const pair = await generateDsaKeys(pqc, s.algorithm as SignatureAlgorithm, traceStart);
+        const { sig } = await signMessage(pqc, message, pair, traceStart);
+        await verifyMessage(pqc, message, sig, pair, traceStart);
+      }
+    } catch { d({ type: "error", value: "The demo could not complete. Reset it and try again." }); }
+    finally { operationLock.current = false; }
+  }
+
+  async function copy(text: string) {
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(text);
+      setCopyError(false); setCopied(true); setTimeout(() => setCopied(false), 1500);
+    } catch { setCopied(false); setCopyError(true); }
+  }
+
+  const installTabs = ["npm", "pnpm", "yarn", "mcp"] as const;
+  function handleInstallKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % installTabs.length;
+    if (event.key === "ArrowLeft") next = (index + installTabs.length - 1) % installTabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = installTabs.length - 1;
+    if (next === index) return;
+    event.preventDefault();
+    setInstallTab(installTabs[next]);
+    installTabsRef.current?.querySelector<HTMLButtonElement>(`[data-install-tab="${installTabs[next]}"]`)?.focus();
+  }
+
+  return (
+    <main>
+      <span className="sr-only" aria-live="polite">{copied ? "Copied" : copyError ? "Unable to copy. Please try again." : ""}</span>
+      <Header />
+
+      {/* ── Hero / Playground ─────────────────────────────────────────────── */}
+      <section id="demo" className="grid-bg border-b line">
+        <div className="mx-auto max-w-[1240px] px-5 py-8 lg:px-8 lg:py-10">
+          <div className="workspace-shell">
+            <div className="workspace-header">
+              <div>
+                <p className="mono text-[10px] uppercase tracking-[.18em] text-[var(--accent)]">Browser-native post-quantum cryptography</p>
+                <h1 className="mt-3 max-w-[680px] text-4xl font-semibold leading-[1.02] tracking-[-.055em] sm:text-5xl lg:text-6xl">
+                  Encrypt. Sign. <span className="text-[var(--muted)]">Connect AI agents.</span>
+                </h1>
+                <p className="mt-4 max-w-[560px] text-sm leading-6 text-[var(--muted)]">
+                  Hybrid encryption, digital signatures, MCP server, and LangChain tools — all in a pure TypeScript SDK. Try the full round trip locally.
+                </p>
+              </div>
+              <div className="workspace-status mono">
+                <span className="status-mark" aria-hidden="true" />
+                <span>{busy ? s.phase.toUpperCase() : succeedState ? (isEncryptMode ? "VERIFIED" : "VALID") : "READY"}</span>
+                <span className="text-[var(--faint)]">LOCAL SESSION</span>
+              </div>
+              <nav className="mobile-navigation" aria-label="Section navigation">
+                <a href="#demo">Playground</a>
+                <a href="#ai-agents">AI Agents</a>
+                <a href="#install">Install</a>
+                <a href="#why-pqc">Why PQC</a>
+                <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer">GitHub</a>
+              </nav>
+            </div>
+            <div className="workspace-grid">
+              <div className="workspace-control">
+                <div className="workspace-region-label">Control plane</div>
+                <Playground
+                  s={s} busy={busy}
+                  generate={generate} encrypt={encrypt} decrypt={decrypt}
+                  sign={sign} verifySignature={verifySignature}
+                  runComplete={runComplete}
+                  onMessage={(value) => d({ type: "message", value })}
+                  onMode={(value) => { executionSnapshot.current = null; d({ type: "mode", value }); }}
+                  onAlgorithm={(value) => { executionSnapshot.current = null; d({ type: "algorithm", value }); }}
+                />
+              </div>
+              <div className="workspace-observe">
+                <div className="workspace-region-label">Execution plane</div>
+                <CryptoViz
+                  phase={s.phase} mode={s.mode}
+                  verified={isEncryptMode ? s.verified : s.signatureValid === true}
+                  sHasPair={!!s.pair}
+                  sHasCipher={isEncryptMode ? !!s.ciphertext : !!s.signatureHex}
+                  times={s.times}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <TrustPanel />
+
+      {/* ── Code snippet ─────────────────────────────────────────────────────── */}
+      <section className="border-y bg-[#0f1215] py-24 line">
+        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8">
+          <div>
+            <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">The API stays small.</h2>
+            <p className="mt-4 max-w-[370px] text-sm leading-6 text-[var(--muted)]">
+              Encrypt, decrypt, sign, and verify — a handful of readable calls cover the complete cryptographic workflow.
+            </p>
+          </div>
+          <div className="overflow-hidden rounded-xl border bg-[#0b0d0f] line">
+            <div className="flex justify-between border-b px-4 py-3 line">
+              <span className="mono text-[10px] text-[var(--faint)]">quickstart.ts</span>
+              <button onClick={() => copy(codeEncrypt)} className="mono text-[11px] text-[var(--accent)]">{copied ? "Copied" : "Copy code"}</button>
+            </div>
+            <pre className="overflow-x-auto p-5 text-[12px] leading-7 text-[#c5d0da]"><code>{codeEncrypt}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Timing metrics ───────────────────────────────────────────────────── */}
+      <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-32">
+        <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Real work, measured locally.</h2>
+        <p className="mt-3 text-sm text-[var(--muted)]">A timing trace from this browser session.</p>
+        <div className="mt-10 grid gap-4 lg:grid-cols-[.8fr_1.2fr]">
+          <div className="rounded-xl border bg-[var(--surface)] p-6 line">
+            <p className="mono text-[10px] text-[var(--faint)]">TOTAL EXECUTION</p>
+            <p className="metric-value mt-5 text-5xl font-semibold tracking-[-.06em]">{total ? <AnimatedNumber value={total} suffix=" ms" /> : "Waiting"}</p>
+            <p className="mt-3 text-sm leading-6 text-[var(--muted)]">Results vary by browser, device, and workload.</p>
+          </div>
+          <div className="rounded-xl border bg-[var(--surface)] p-6 line">
+            {(isEncryptMode
+              ? [["Key generation", s.times.key, "Creates the post-quantum key pair"], ["Encryption", s.times.encrypt, "Seals the message with the public key"], ["Decryption", s.times.decrypt, "Recovers the message with the secret key"]]
+              : [["Key generation", s.times.key, "Creates the ML-DSA signing key pair"], ["Signing", s.times.sign, "Produces the post-quantum signature"], ["Verification", s.times.verify, "Checks signature authenticity"]]
+            ).map(([label, value, desc]) => (
+              <div key={label as string} className="border-b py-4 first:pt-0 last:border-0 line">
+                <div className="flex justify-between text-sm">
+                  <span>{label}</span>
+                  <span className="mono text-xs text-[var(--accent)]">{ms(value as number | null)}</span>
+                </div>
+                <div className="mt-3 h-1 bg-[#283038]">
+                  <div className="h-full bg-[var(--accent)]" style={{ width: value ? `${Math.max(5, ((value as number) / max) * 100)}%` : "0%" }} />
+                </div>
+                <p className="mt-2 text-xs text-[var(--muted)]">{desc}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── AI Agent integration ─────────────────────────────────────────────── */}
+      <section id="ai-agents" className="border-y bg-[#0f1215] py-24 line">
+        <div className="mx-auto max-w-[1240px] px-5 lg:px-8">
+          <div className="grid gap-10 lg:grid-cols-[1fr_1fr]">
+            <div>
+              <p className="mono text-[10px] uppercase tracking-[.18em] text-[var(--accent)]">First-class AI integration</p>
+              <h2 className="mt-4 text-3xl font-semibold tracking-[-.04em] sm:text-4xl">PQC operations as native AI tool calls.</h2>
+              <p className="mt-4 text-sm leading-6 text-[var(--muted)]">
+                The SDK ships an MCP stdio server and LangChain/LangGraph tool wrappers. Drop the same six operations — list algorithms, keygen, encrypt, decrypt, sign, verify — into any AI agent.
+              </p>
+              <div className="mt-8 space-y-4">
+                <AgentCard
+                  title="@pqc-sdk/mcp-server"
+                  badge="MCP"
+                  desc="Works with Claude Desktop, Cursor, Continue, and any MCP-compatible host. Install globally and add one JSON config block."
+                  code={`npm install -g @pqc-sdk/mcp-server\n# Claude Desktop: add "pqc": { "command": "pqc-mcp" }`}
+                />
+                <AgentCard
+                  title="@pqc-sdk/langchain"
+                  badge="LangChain"
+                  desc="Structured tools for LangGraph agents, OpenAI tool-calling, and Anthropic tool-use. Drop pqcTools into any createReactAgent call."
+                  code={`import { pqcTools } from '@pqc-sdk/langchain';\nconst agent = createReactAgent({ llm: model, tools: pqcTools });`}
+                />
+              </div>
+            </div>
+            <div className="self-center">
+              <MpcToolTable />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Install ──────────────────────────────────────────────────────────── */}
+      <section id="install" className="border-b py-24 line">
+        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8">
+          <div>
+            <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Install the SDK.</h2>
+            <p className="mt-4 text-sm text-[var(--muted)]">Add browser-ready post-quantum encryption to a TypeScript project.</p>
+            <div className="mt-7 flex flex-wrap gap-5 text-sm text-[var(--accent)]">
+              <a href="https://jeloercc.github.io/pqc-sdk/" target="_blank" rel="noreferrer">View Documentation</a>
+              <a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer">Quick Start</a>
+            </div>
+          </div>
+          <div>
+            <div ref={installTabsRef} role="tablist" aria-label="Package manager" className="mb-3 flex gap-5 border-b line">
+              {(["npm", "pnpm", "yarn", "mcp"] as const).map((tab, i) => (
+                <button
+                  key={tab}
+                  id={`install-tab-${tab}`}
+                  role="tab"
+                  aria-selected={installTab === tab}
+                  aria-controls={`install-panel-${tab}`}
+                  tabIndex={installTab === tab ? 0 : -1}
+                  data-install-tab={tab}
+                  onClick={() => setInstallTab(tab)}
+                  onKeyDown={(e) => handleInstallKeyDown(e, i)}
+                  className={`pb-3 text-xs ${installTab === tab ? "border-b-2 border-[var(--accent)] text-[var(--text)]" : "text-[var(--muted)]"}`}
+                >{tab === "mcp" ? "AI agent" : tab}</button>
+              ))}
+            </div>
+            {installTab === "npm" && (
+              <div id="install-panel-npm" role="tabpanel" aria-labelledby="install-tab-npm" className="space-y-2">
+                <InstallBlock cmd="npm install @pqc-sdk/core" onCopy={copy} copied={copied} />
+                <InstallBlock cmd="npm install @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+              </div>
+            )}
+            {installTab === "pnpm" && (
+              <div id="install-panel-pnpm" role="tabpanel" aria-labelledby="install-tab-pnpm" className="space-y-2">
+                <InstallBlock cmd="pnpm add @pqc-sdk/core" onCopy={copy} copied={copied} />
+                <InstallBlock cmd="pnpm add @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+              </div>
+            )}
+            {installTab === "yarn" && (
+              <div id="install-panel-yarn" role="tabpanel" aria-labelledby="install-tab-yarn" className="space-y-2">
+                <InstallBlock cmd="yarn add @pqc-sdk/core" onCopy={copy} copied={copied} />
+                <InstallBlock cmd="yarn add @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+              </div>
+            )}
+            {installTab === "mcp" && (
+              <div id="install-panel-mcp" role="tabpanel" aria-labelledby="install-tab-mcp" className="space-y-2">
+                <InstallBlock cmd="npm install -g @pqc-sdk/mcp-server" onCopy={copy} copied={copied} label="MCP server (Claude, Cursor…)" />
+                <InstallBlock cmd="npm install @pqc-sdk/langchain @pqc-sdk/core" onCopy={copy} copied={copied} label="LangChain / LangGraph" />
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Packages table ───────────────────────────────────────────────────── */}
+      <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-28">
+        <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Four packages. One purpose.</h2>
+        <p className="mt-3 text-sm text-[var(--muted)]">Each package has a single responsibility. Use only what you need.</p>
+        <div className="mt-10 grid gap-3 sm:grid-cols-2">
+          <PackageCard name="@pqc-sdk/core" badge="497 tests" desc="Encryption, signatures, key handling, and streaming. Node 20+, Deno, Cloudflare Workers, React Native." href="https://www.npmjs.com/package/@pqc-sdk/core" />
+          <PackageCard name="@pqc-sdk/cli" badge="CLI" desc="pqc init / keygen / encrypt / decrypt / audit — project scaffolding and file-level crypto via npx." href="https://www.npmjs.com/package/@pqc-sdk/cli" />
+          <PackageCard name="@pqc-sdk/mcp-server" badge="MCP" desc="stdio server exposing 6 PQC tool calls. Compatible with Claude Desktop, Cursor, Continue, and any MCP host." href="https://github.com/jeloercc/pqc-sdk" />
+          <PackageCard name="@pqc-sdk/langchain" badge="LangChain" desc="StructuredTool wrappers for LangGraph agents, OpenAI tool-calling, and Anthropic tool-use." href="https://github.com/jeloercc/pqc-sdk" />
+        </div>
+      </section>
+
+      {/* ── Why PQC ──────────────────────────────────────────────────────────── */}
+      <section id="why-pqc" className="border-y bg-[#0f1215] py-24 line">
+        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[1.2fr_.8fr] lg:px-8">
+          <h2 className="max-w-[720px] text-4xl font-semibold leading-[1.05] tracking-[-.05em] sm:text-6xl">Encrypted traffic can be stored today and targeted later.</h2>
+          <div className="self-end space-y-4">
+            <p className="border-l-2 border-[var(--accent)] pl-5 text-sm leading-7 text-[var(--muted)]">Post-quantum cryptography is designed to protect against the risk of future large-scale quantum computers. NIST finalised FIPS 203 and FIPS 204 in 2024.</p>
+            <FipsTable />
+          </div>
+        </div>
+      </section>
+
+      {/* ── FIPS conformance ─────────────────────────────────────────────────── */}
+      <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-28">
+        <div className="grid gap-10 lg:grid-cols-[1fr_1fr]">
+          <div>
+            <p className="mono text-[10px] uppercase tracking-[.16em] text-[var(--accent)]">Self-assessment</p>
+            <h2 className="mt-3 text-3xl font-semibold tracking-[-.04em] sm:text-4xl">FIPS 203 / 204 conformance.</h2>
+            <p className="mt-4 text-sm leading-6 text-[var(--muted)]">
+              Clause-by-clause matrices cover 43 requirements across both standards. Six NONCONFORMING findings were identified and closed: floating-point arithmetic, implicit-reject branches, missing zeroization, and wrong error attribution.
+            </p>
+            <p className="mt-3 text-xs text-[var(--faint)]">This is self-assessment, not CMVP validation. ACVP vectors passing is assurance evidence, not proof of every clause.</p>
+          </div>
+          <div className="space-y-3">
+            {[
+              { id: "F203-19", desc: "Floating-point in Compress_d — replaced with integer-only bit-shift arithmetic." },
+              { id: "F204-13", desc: "Floating-point in Decompose / Power2Round / HINT_M — verified over all 8M values of Z_q." },
+              { id: "F203-18", desc: "Branch-based implicit-reject — replaced with byte-wise arithmetic mask." },
+              { id: "F204-10", desc: "Missing zeroization on ML-DSA verify path — fixed with try/finally on all exit paths." },
+              { id: "F203-11", desc: "RBG failure misattributed as INVALID_KEY — dedicated RBG_FAILURE error code." },
+              { id: "F204-08", desc: "Wrong-length public key throws instead of returning false." },
+            ].map(({ id, desc }) => (
+              <div key={id} className="flex gap-3 rounded-lg border bg-[var(--surface)] p-4 line">
+                <span className="mono shrink-0 text-[10px] text-[var(--success)]">CLOSED</span>
+                <div>
+                  <span className="mono text-xs text-[var(--accent)]">{id}</span>
+                  <p className="mt-1 text-xs leading-5 text-[var(--muted)]">{desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Built in the open ─────────────────────────────────────────────────── */}
+      <section className="border-t bg-[var(--surface)] py-24 line">
+        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.8fr_1.2fr] lg:px-8">
+          <div>
+            <h2 className="text-4xl font-semibold tracking-[-.05em] sm:text-6xl">Built in the open.</h2>
+            <p className="mt-5 max-w-[500px] text-sm leading-6 text-[var(--muted)]">Explore the implementation and install the package from its primary sources.</p>
+            <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer" className="mt-7 inline-flex rounded-lg bg-[var(--accent)] px-5 py-3 text-sm font-semibold text-[#0b0d0f]">View on GitHub</a>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <a href="https://github.com/jeloercc/pqc-sdk/blob/main/LICENSE" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">MIT License</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">License</span></a>
+            <a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Documentation</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Quick start</span></a>
+            <a href="https://jeloercc.github.io/pqc-sdk/api/" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">API Reference</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">API</span></a>
+            <a href="https://www.npmjs.com/package/@pqc-sdk/core" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">npm package</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">@pqc-sdk/core</span></a>
+            <a href="https://github.com/jeloercc/pqc-sdk/blob/main/docs/AUDIT-2026-06.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Security Audit</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">AUDIT-2026-06</span></a>
+            <a href="https://github.com/jeloercc/pqc-sdk/tree/main/MPC" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">A2A Protocol</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Agent-to-Agent spec</span></a>
+          </div>
+        </div>
+      </section>
+
+      <footer className="mx-auto flex max-w-[1240px] flex-col gap-3 px-5 py-8 text-xs text-[var(--faint)] sm:flex-row sm:justify-between lg:px-8">
+        <span className="mono">PQC SDK / Open source post-quantum cryptography</span>
+        <span>MIT License. Keys stay in memory and leave with the session.</span>
+      </footer>
+    </main>
+  );
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function CryptoViz({ phase, mode, verified, sHasPair, sHasCipher, times }: { phase: Phase; mode: Mode; verified: boolean; sHasPair: boolean; sHasCipher: boolean; times: State["times"] }) {
+  const state = verified ? "trust" : phase === "generating" ? "commitment" : (phase === "encrypting" || phase === "signing") ? "challenge" : (phase === "decrypting" || phase === "verifying") ? "response" : sHasCipher ? "challenge" : sHasPair ? "commitment" : "entropy";
+  const cells = Array.from({ length: 96 }, (_, index) => { const row = Math.floor(index / 16); const col = index % 16; const edge = row === 1 || row === 6 || col === 1 || col === 14; const core = (row >= 2 && row <= 5 && col >= 4 && col <= 11); const diagonal = (row === col - 2 || row === 7 - col); return <span key={index} className={`crypto-pixel crypto-${state} ${edge ? "crypto-edge" : ""} ${core ? "crypto-core" : ""} ${diagonal ? "crypto-diagonal" : ""}`} style={{ "--i": index, "--row": row, "--col": col, "--phase-delay": `${(index % 12) * 55}ms` } as React.CSSProperties} />; });
+  const labels = state === "trust" ? ["ENTROPY", "COMMITMENT", "CHALLENGE", "RESPONSE", "VERIFIED"] : state === "entropy" ? ["ENTROPY", "TRANSCRIPT READY"] : state === "commitment" ? ["ENTROPY", "COMMITMENT"] : state === "challenge" ? ["ENTROPY", "COMMITMENT", "CHALLENGE"] : ["ENTROPY", "COMMITMENT", "CHALLENGE", "RESPONSE"];
+  const operation =
+    phase === "generating" ? { label: "Generate keys", description: "Creating a post-quantum key pair", time: times.key } :
+    phase === "encrypting" ? { label: "Encrypt message", description: "Sealing the message with the public key", time: times.encrypt } :
+    phase === "decrypting" ? { label: "Decrypt message", description: "Recovering plaintext with the secret key", time: times.decrypt } :
+    phase === "signing" ? { label: "Sign message", description: "Producing the ML-DSA signature", time: times.sign } :
+    phase === "verifying" ? { label: "Verify signature", description: "Checking signature authenticity", time: times.verify } :
+    verified ? { label: mode === "sign" ? "Signature verified" : "Verification complete", description: mode === "sign" ? "Signature is authentic and untampered" : "Plaintext matches the original message", time: mode === "sign" ? times.verify : times.decrypt } :
+    sHasCipher ? { label: mode === "sign" ? "Signature ready" : "Ciphertext ready", description: mode === "sign" ? "Signature bytes are ready to verify" : "Encrypted bytes are ready to decrypt", time: mode === "sign" ? times.sign : times.encrypt } :
+    sHasPair ? { label: "Key pair ready", description: "Public and secret keys are available", time: times.key } :
+    { label: "Waiting for input", description: "Run the workflow to create a transcript", time: null };
+  const execution = phase !== "idle" ? "Running" : verified ? "Complete" : sHasCipher ? "Ready" : sHasPair ? "Ready" : "Idle";
+  return (
+    <div className={`crypto-visual crypto-state-${state}`} aria-describedby="crypto-execution-live">
+      <div className="crypto-visual-head"><span className="mono">TRANSCRIPT ENGINE</span><span className="mono">{state.toUpperCase()}</span></div>
+      <div className="crypto-stage" aria-hidden="true">
+        <div className="crypto-path crypto-path-a" /><div className="crypto-path crypto-path-b" /><div className="crypto-path crypto-path-c" />
+        <div className="crypto-node crypto-node-a" /><div className="crypto-node crypto-node-b" /><div className="crypto-node crypto-node-c" />
+        <div className="crypto-lattice">{cells}</div>
+      </div>
+      <div className="crypto-transcript" aria-label="Cryptographic phases">{labels.map((label, index) => <span key={label} className={index < labels.length - 1 ? "transcript-done" : "transcript-current"}>{label}</span>)}</div>
+      <div className="crypto-observation">
+        <div>
+          <span className="mono text-[10px] text-[var(--faint)]">ACTIVE OPERATION</span>
+          <strong>{operation.label}</strong>
+          <span>{operation.description}</span>
+        </div>
+        <div className="crypto-observation-meta">
+          <span className="mono text-[10px] text-[var(--faint)]">ELAPSED</span>
+          <strong>{ms(operation.time)}</strong>
+          <span className={`mono text-[10px] ${verified ? "text-[var(--success)]" : "text-[var(--accent)]"}`}>{execution.toUpperCase()}</span>
+        </div>
+      </div>
+      <div id="crypto-execution-live" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        Cryptographic transcript: {labels.join(", ")}. Active operation: {operation.label}. {operation.description}. Execution state: {execution}. Elapsed time: {ms(operation.time)}.
+      </div>
+    </div>
+  );
+}
+
+function Header() {
+  return (
+    <header className="site-header mx-auto flex min-h-[72px] max-w-[1240px] flex-wrap items-center justify-between gap-3 border-b px-5 line lg:px-8">
+      <a href="#" className="flex items-center gap-3 text-sm font-semibold">
+        <span className="mono text-[var(--accent)]">[pqc]</span>PQC SDK
+      </a>
+      <nav className="hidden gap-8 text-sm text-[var(--muted)] sm:flex">
+        <a href="#demo">Demo</a>
+        <a href="#ai-agents">AI Agents</a>
+        <a href="#install">Install</a>
+        <a href="#why-pqc">Why PQC</a>
+        <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+      <a href="#demo" className="rounded-lg border px-3 py-2 text-xs text-[var(--accent)] line">Run the Demo</a>
+    </header>
+  );
+}
+
+function TrustPanel() {
+  return (
+    <section className="border-b py-6 line">
+      <div className="mx-auto grid max-w-[1240px] gap-4 px-5 sm:grid-cols-2 lg:grid-cols-5 lg:px-8">
+        <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
+          <span className="block font-medium">Open Source</span><span className="mt-1 block text-xs text-[var(--muted)]">MIT License</span>
+        </a>
+        <a href="https://jeloercc.github.io/pqc-sdk/" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
+          <span className="block font-medium">Browser Native</span><span className="mt-1 block text-xs text-[var(--muted)]">No server required</span>
+        </a>
+        <a href="https://github.com/jeloercc/pqc-sdk/tree/main/packages/mcp-server" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
+          <span className="block font-medium">MCP + LangChain</span><span className="mt-1 block text-xs text-[var(--muted)]">AI agent tools</span>
+        </a>
+        <a href="https://github.com/jeloercc/pqc-sdk/tree/main/docs/compliance" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
+          <span className="block font-medium">FIPS 203 / 204</span><span className="mt-1 block text-xs text-[var(--muted)]">Self-assessed</span>
+        </a>
+        <a href="https://www.npmjs.com/package/@pqc-sdk/core" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
+          <span className="block font-medium">497 Tests</span><span className="mt-1 block text-xs text-[var(--muted)]">All passing</span>
+        </a>
+      </div>
+    </section>
+  );
+}
+
+function Playground({ s, busy, generate, encrypt, decrypt, sign, verifySignature, runComplete, onMessage, onMode, onAlgorithm }: {
+  s: State; busy: boolean;
+  generate: () => void; encrypt: () => void; decrypt: () => void;
+  sign: () => void; verifySignature: () => void;
+  runComplete: () => void;
+  onMessage: (v: string) => void;
+  onMode: (v: Mode) => void;
+  onAlgorithm: (v: DemoAlgorithm) => void;
+}) {
+  const isEncrypt = s.mode === "encrypt";
+  const isSign = s.mode === "sign";
+  const succeedState = isEncrypt ? s.verified : s.signatureValid === true;
+  const kemAlgorithms: { value: KemAlgorithm; label: string; detail: string }[] = [
+    { value: "x-wing", label: "X-Wing", detail: "Hybrid default" },
+    { value: "ml-kem-512", label: "ML-KEM-512", detail: "FIPS 203 cat.1" },
+    { value: "ml-kem-768", label: "ML-KEM-768", detail: "FIPS 203 cat.3" },
+    { value: "ml-kem-1024", label: "ML-KEM-1024", detail: "FIPS 203 cat.5" },
+  ];
+  const dsaAlgorithms: { value: SignatureAlgorithm; label: string; detail: string }[] = [
+    { value: "ml-dsa-44", label: "ML-DSA-44", detail: "FIPS 204 cat.2" },
+    { value: "ml-dsa-65", label: "ML-DSA-65", detail: "Recommended" },
+    { value: "ml-dsa-87", label: "ML-DSA-87", detail: "FIPS 204 cat.5" },
+  ];
+
+  return (
+    <div aria-busy={busy} className="workspace-playground">
+      <div className="flex justify-between border-b pb-4 line">
+        <span className="mono text-[10px] text-[var(--faint)]">pqc playground</span>
+        <span role="status" aria-live="polite" className={`mono text-[10px] ${succeedState ? "text-[var(--success)]" : "text-[var(--accent)]"}`}>
+          {busy ? s.phase.toUpperCase() : succeedState ? (isEncrypt ? "VERIFIED" : "VALID") : "READY"}
+        </span>
+      </div>
+
+      {/* Mode toggle */}
+      <div className="mt-5 flex gap-1 rounded-lg border p-1 line">
+        <button
+          type="button"
+          aria-pressed={isEncrypt}
+          disabled={busy}
+          onClick={() => onMode("encrypt")}
+          className={`flex-1 rounded-md py-2 text-xs font-medium transition-colors ${isEncrypt ? "bg-[var(--accent)] text-[#0b0d0f]" : "text-[var(--muted)] hover:text-[var(--text)]"}`}
+        >Encrypt / Decrypt</button>
+        <button
+          type="button"
+          aria-pressed={isSign}
+          disabled={busy}
+          onClick={() => onMode("sign")}
+          className={`flex-1 rounded-md py-2 text-xs font-medium transition-colors ${isSign ? "bg-[var(--accent)] text-[#0b0d0f]" : "text-[var(--muted)] hover:text-[var(--text)]"}`}
+        >Sign / Verify</button>
+      </div>
+
+      <label className="mt-5 block text-[12px] text-[var(--muted)]" htmlFor="hero-message">Message</label>
+      <textarea
+        id="hero-message"
+        maxLength={2000}
+        value={s.message}
+        disabled={busy}
+        onChange={(e) => onMessage(e.target.value)}
+        className="mt-3 min-h-[92px] w-full resize-y rounded-lg border bg-[#0d1012] p-3 text-sm leading-6 outline-none line focus:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
+      />
+
+      {/* Algorithm selection */}
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {(isEncrypt ? kemAlgorithms : dsaAlgorithms).map(({ value, label, detail }) => (
+          <Algo key={value} active={s.algorithm === value} onClick={() => onAlgorithm(value)} title={label} detail={detail} disabled={busy} />
+        ))}
+      </div>
+
+      <button
+        onClick={runComplete}
+        disabled={busy}
+        className="mt-4 w-full rounded-lg bg-[var(--accent)] px-4 py-3 text-sm font-semibold text-[#0b0d0f] transition-colors hover:bg-white active:scale-[.98] disabled:cursor-wait disabled:opacity-60"
+      >{busy ? "Processing..." : `Run complete ${isEncrypt ? "encryption" : "signing"} demo`}</button>
+
+      {/* Step-by-step controls */}
+      <div className="mt-4 space-y-3">
+        <Mini title="Generate Keys" operation="generating" active={s.phase === "generating"} time={s.times.key} done={!!s.pair} run={generate} disabled={busy} />
+        {isEncrypt ? (
+          <>
+            <Mini title="Encrypt Message" operation="encrypting" active={s.phase === "encrypting"} time={s.times.encrypt} done={!!s.ciphertext} run={encrypt} disabled={busy} />
+            <Mini title="Decrypt Message" operation="decrypting" active={s.phase === "decrypting"} time={s.times.decrypt} done={s.verified} run={decrypt} disabled={busy} />
+          </>
+        ) : (
+          <>
+            <Mini title="Sign Message" operation="signing" active={s.phase === "signing"} time={s.times.sign} done={!!s.signatureHex} run={sign} disabled={busy} />
+            <Mini title="Verify Signature" operation="verifying" active={s.phase === "verifying"} time={s.times.verify} done={s.signatureValid === true} run={verifySignature} disabled={busy} />
+          </>
+        )}
+      </div>
+
+      {s.error && (
+        <p role="alert" className="mt-4 rounded-lg border border-[var(--danger)] bg-[rgba(242,148,148,.06)] px-4 py-3 text-xs text-[var(--danger)]">{s.error}</p>
+      )}
+
+      {succeedState && (
+        <div className="success-pop mt-5 rounded-lg border border-[rgba(139,214,174,.32)] bg-[rgba(139,214,174,.08)] px-4 py-4">
+          <p className="text-sm font-semibold text-[var(--success)]">{isEncrypt ? "✓ Messages match — round trip verified." : "✓ Signature valid — authentication confirmed."}</p>
+          <div className="result-metrics mt-3 grid gap-3 pt-3 sm:grid-cols-3">
+            <Metric label="Key generation" value={s.times.key} />
+            {isEncrypt ? <><Metric label="Encryption" value={s.times.encrypt} /><Metric label="Decryption" value={s.times.decrypt} /></> : <><Metric label="Signing" value={s.times.sign} /><Metric label="Verification" value={s.times.verify} /></>}
+          </div>
+        </div>
+      )}
+
+      <ExecutionDetails s={s} />
+    </div>
+  );
+}
+
+function Mini({ title, operation, time, active, done, run, disabled }: { title: string; operation: Phase; time: number | null; active: boolean; done: boolean; run: () => void; disabled: boolean }) {
+  const verbMap: Record<string, [string, string, string]> = {
+    generating: ["Generate", "Generating", "Generated"],
+    encrypting: ["Encrypt", "Encrypting", "Encrypted"],
+    decrypting: ["Decrypt", "Decrypting", "Decrypted"],
+    signing: ["Sign", "Signing", "Signed"],
+    verifying: ["Verify", "Verifying", "Verified"],
+  };
+  const [verb, present, past] = verbMap[operation] ?? ["Run", "Running", "Done"];
+  return (
+    <div className={`operation-row flex items-center gap-3 rounded-lg border p-4 line ${done ? "operation-done" : ""}`}>
+      <span className={`mono text-[10px] ${done ? "text-[var(--success)]" : active ? "text-[var(--accent)]" : "text-[var(--faint)]"}`}>{done ? "OK" : active ? "..." : "--"}</span>
+      <span className="flex-1 text-sm">
+        <span className="block">{active ? `${present}...` : title}</span>
+        {done && <span className="mono mt-1 block text-[10px] text-[var(--success)]">{past} in {ms(time)}</span>}
+      </span>
+      <button onClick={run} disabled={disabled} className="rounded-md border px-3 py-2 text-xs transition-colors hover:border-[var(--accent)] active:scale-[.98]">{done ? "Run again" : verb}</button>
+    </div>
+  );
+}
+
+function Algo({ active, onClick, title, detail, disabled }: { active: boolean; onClick: () => void; title: string; detail: string; disabled: boolean }) {
+  return (
+    <button type="button" aria-pressed={active} disabled={disabled} onClick={onClick} className={`rounded-lg border p-3 text-left line disabled:cursor-not-allowed disabled:opacity-60 ${active ? "border-[var(--accent)] bg-[#78b8ff12]" : ""}`}>
+      <span className="block text-xs">{title}</span>
+      <span className="mono mt-1 block text-[10px] text-[var(--muted)]">{detail}</span>
+    </button>
+  );
+}
+
+function InstallBlock({ cmd, onCopy, copied, label }: { cmd: string; onCopy: (text: string) => void; copied: boolean; label?: string }) {
+  return (
+    <div className="overflow-hidden rounded-lg border bg-[#0b0d0f] line">
+      {label && <div className="border-b px-4 py-2 text-[10px] text-[var(--faint)] line">{label}</div>}
+      <div className="flex items-center justify-between gap-3 px-4 py-3">
+        <code className="mono text-sm text-[#c5d0da]">{cmd}</code>
+        <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">{copied ? "Copied" : "Copy"}</button>
+      </div>
+    </div>
+  );
+}
+
+function PackageCard({ name, badge, desc, href }: { name: string; badge: string; desc: string; href: string }) {
+  return (
+    <a href={href} target="_blank" rel="noreferrer" className="group rounded-lg border bg-[var(--surface)] p-5 line block transition-colors hover:border-[var(--accent)]">
+      <div className="flex items-start justify-between gap-2">
+        <span className="mono text-sm text-[var(--text)]">{name}</span>
+        <span className="mono rounded border px-2 py-0.5 text-[9px] text-[var(--accent)] line">{badge}</span>
+      </div>
+      <p className="mt-3 text-xs leading-5 text-[var(--muted)]">{desc}</p>
+    </a>
+  );
+}
+
+function AgentCard({ title, badge, desc, code }: { title: string; badge: string; desc: string; code: string }) {
+  return (
+    <div className="rounded-lg border bg-[rgba(255,255,255,.03)] p-4 line">
+      <div className="flex items-center gap-3">
+        <span className="mono text-sm text-[var(--text)]">{title}</span>
+        <span className="mono rounded border px-2 py-0.5 text-[9px] text-[var(--accent)] line">{badge}</span>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{desc}</p>
+      <pre className="mt-3 overflow-x-auto rounded border bg-[#0b0d0f] p-3 text-[10px] leading-5 text-[#a8b8c0] line"><code>{code}</code></pre>
+    </div>
+  );
+}
+
+function MpcToolTable() {
+  const tools = [
+    { tool: "pqc_algorithms", input: "(none)", output: "supported[], fips[]" },
+    { tool: "pqc_keygen", input: "algorithm?", output: "publicToken, secretToken" },
+    { tool: "pqc_encrypt", input: "plaintext, publicToken", output: "ciphertextHex" },
+    { tool: "pqc_decrypt", input: "ciphertextHex, secretToken", output: "plaintext" },
+    { tool: "pqc_sign", input: "message, secretToken", output: "signatureHex" },
+    { tool: "pqc_verify", input: "message, signatureHex, publicToken", output: "verified" },
+  ];
+  return (
+    <div className="overflow-hidden rounded-lg border bg-[rgba(255,255,255,.025)] line">
+      <div className="border-b px-4 py-3 line">
+        <span className="mono text-[10px] text-[var(--faint)]">MCP / LangChain tool inventory</span>
+      </div>
+      <div className="divide-y" style={{ borderColor: "rgba(237,241,244,.08)" }}>
+        {tools.map(({ tool, input, output }) => (
+          <div key={tool} className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-4 py-3 text-[11px]">
+            <span className="mono text-[var(--accent)]">{tool}</span>
+            <span className="text-[var(--muted)]">{input}</span>
+            <span className="mono text-[var(--faint)]">{output}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function FipsTable() {
+  return (
+    <div className="overflow-hidden rounded-lg border line">
+      {[
+        { std: "FIPS 203", alg: "ML-KEM", replaces: "RSA / ECDH" },
+        { std: "FIPS 204", alg: "ML-DSA", replaces: "ECDSA / RSA-sig" },
+        { std: "FIPS 205", alg: "SLH-DSA", replaces: "Long-lived roots" },
+      ].map(({ std, alg, replaces }) => (
+        <div key={std} className="grid grid-cols-3 gap-2 border-b px-4 py-3 text-xs last:border-0 line">
+          <span className="mono text-[var(--accent)]">{std}</span>
+          <span>{alg}</span>
+          <span className="text-[var(--muted)]">{replaces}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AnimatedNumber({ value, suffix = "" }: { value: number; suffix?: string }) {
+  const [display, setDisplay] = useState(0);
+  useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { setDisplay(value); return; }
+    const start = performance.now(); const duration = 500; let frame = 0;
+    const tick = (now: number) => { const progress = Math.min((now - start) / duration, 1); setDisplay(value * progress); if (progress < 1) frame = requestAnimationFrame(tick); };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [value]);
+  return <>{display.toFixed(1)}{suffix}</>;
+}
+
+function Metric({ label, value }: { label: string; value: number | null }) {
+  return (
+    <div>
+      <p className="mono text-[10px] text-[var(--faint)]">{label}</p>
+      <p className="metric-value mt-2 text-xs">{value === null ? "Waiting" : <AnimatedNumber value={value} suffix=" ms" />}</p>
+    </div>
+  );
+}
+
+function ExecutionDetails({ s }: { s: State }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const isEncrypt = s.mode === "encrypt";
+  const succeedState = isEncrypt ? s.verified : s.signatureValid === true;
+  useEffect(() => { if (succeedState) { setDetailsOpen(true); setArtifactsOpen(true); } }, [succeedState]);
+  if (!s.pair) return null;
+  return (
+    <>
+      <details open={detailsOpen} onToggle={(e) => setDetailsOpen(e.currentTarget.open)} className="details-panel mt-4 rounded-lg border line">
+        <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Execution details <span className="mono float-right text-[10px] text-[var(--faint)]">metadata only</span></summary>
+        <div className="grid gap-x-5 gap-y-4 border-t px-4 py-4 sm:grid-cols-2 line">
+          <Detail label="Mode" value={isEncrypt ? "Encryption" : "Signatures"} />
+          <Detail label="Algorithm" value={s.algorithm} />
+          <Detail label="Public key size" value={`${s.pair.publicKey.bytes.byteLength} bytes`} />
+          <Detail label="Secret key size" value={`${s.pair.secretKey.bytes.byteLength} bytes`} />
+          {isEncrypt && s.ciphertext && <Detail label="Ciphertext size" value={`${s.ciphertext.byteLength} bytes`} />}
+          {isEncrypt && <Detail label="Plaintext size" value={s.plaintextSize === null ? "Waiting" : `${s.plaintextSize} bytes`} />}
+          {isEncrypt && <Detail label="Verification status" value={s.verified ? "Messages match" : "Not verified"} success={s.verified} />}
+          {!isEncrypt && s.signatureHex && <Detail label="Signature size" value={`${Math.round(s.signatureHex.length / 2)} bytes`} />}
+          {!isEncrypt && <Detail label="Signature status" value={s.signatureValid === null ? "Waiting" : s.signatureValid ? "Valid" : "Invalid"} success={s.signatureValid === true} />}
+        </div>
+      </details>
+      {(s.ciphertext || s.signatureHex) && (
+        <details open={artifactsOpen} onToggle={(e) => setArtifactsOpen(e.currentTarget.open)} className="details-panel mt-3 rounded-lg border line">
+          <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Cryptographic artifacts <span className="mono float-right text-[10px] text-[var(--faint)]">previews only</span></summary>
+          <div className="space-y-4 border-t px-4 py-4 line">
+            {isEncrypt && s.ciphertext && <Detail label="Ciphertext preview" value={hexPreview(s.ciphertext)} />}
+            {isEncrypt && <Detail label="Plaintext preview" value={s.plaintext ? preview(s.plaintext) : "Waiting"} />}
+            {isEncrypt && <Detail label="Verification result" value={s.verified ? "✓ Messages Match" : "Not verified"} success={s.verified} />}
+            {!isEncrypt && s.signatureHex && <Detail label="Signature preview" value={`${s.signatureHex.slice(0, 36)}...`} />}
+            {!isEncrypt && <Detail label="Verification result" value={s.signatureValid === true ? "✓ Signature Valid" : s.signatureValid === false ? "✗ Invalid" : "Not verified"} success={s.signatureValid === true} />}
+          </div>
+        </details>
+      )}
+      <Trace events={s.trace} />
+    </>
+  );
+}
+
+function Detail({ label, value, success }: { label: string; value: string; success?: boolean }) {
+  return (
+    <div className="min-w-0">
+      <p className="mono text-[10px] text-[var(--faint)]">{label}</p>
+      <p className={`mt-1 truncate text-xs ${success ? "text-[var(--success)]" : ""}`}>{value}</p>
+    </div>
+  );
+}
+
+function Trace({ events }: { events: TraceEvent[] }) {
+  return (
+    <div className="trace-panel mt-4 border-t pt-4 line">
+      <div className="mb-3 flex items-center justify-between">
+        <span className="mono text-[10px] uppercase tracking-[.15em] text-[var(--muted)]">Execution trace</span>
+        <span className="mono text-[10px] text-[var(--faint)]">{events.length} events</span>
+      </div>
+      <div className="space-y-3">
+        {events.map((event, index) => (
+          <div key={`${event.label}-${index}`} className="trace-event flex gap-3">
+            <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${event.tone === "success" ? "bg-[var(--success)]" : "bg-[var(--accent)]"}`} />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap justify-between gap-x-3 text-xs">
+                <span>{event.label}</span>
+                <span className="mono text-[10px] text-[var(--accent)]">[{event.time.toFixed(1)} ms]</span>
+              </div>
+              <p className="mt-1 text-[10px] text-[var(--muted)]">{event.detail}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function preview(value: string) { const compact = value.replace(/\s+/g, " ").trim(); return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact; }
+function hex(value: Uint8Array) { return Array.from(value).map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
+function fromHex(value: string) { const clean = value.replace(/\s+/g, ""); if (!/^(?:[0-9a-fA-F]{2})*$/.test(clean)) throw new Error("Invalid hexadecimal."); const result = new Uint8Array(clean.length / 2); for (let i = 0; i < result.length; i++) result[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16); return result; }
+function hexPreview(value: Uint8Array) { return `${hex(value).slice(0, 36)}...`; }
