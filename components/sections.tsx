@@ -104,7 +104,7 @@ function Architecture() {
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
-export function CliSection({ onCopy }: { onCopy: (text: string) => void }) {
+export function CliSection({ onCopy, copiedText }: { onCopy: (text: string) => void; copiedText: string | null }) {
   const commands = [
     { cmd: "npx @pqc-sdk/cli init", desc: "Sets up a project in seconds: config file, development keys, .gitignore entries and a working example.ts." },
     { cmd: "npx @pqc-sdk/cli keygen --algorithm ml-dsa-65 --out keys/", desc: "Generates a key pair and writes it as base64url files (secret key file is 0600)." },
@@ -125,7 +125,7 @@ export function CliSection({ onCopy }: { onCopy: (text: string) => void }) {
             <div key={cmd} className="overflow-hidden rounded-lg border bg-[#0b0d0f] line">
               <div className="flex items-center justify-between gap-3 border-b px-4 py-3 line">
                 <code className="mono overflow-x-auto whitespace-nowrap text-xs text-[#c5d0da]">{cmd}</code>
-                <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">Copy</button>
+                <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">{copiedText === cmd ? "Copied" : "Copy"}</button>
               </div>
               <p className="px-4 py-3 text-xs leading-5 text-[var(--muted)]">{desc}</p>
             </div>

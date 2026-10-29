@@ -25,7 +25,7 @@ type State = {
   plaintextSize: number | null;
   verified: boolean;
   // sign mode
-  signatureHex: string | null;
+  signature: Uint8Array | null;
   signatureValid: boolean | null;
   times: { key: number | null; encrypt: number | null; decrypt: number | null; sign: number | null; verify: number | null };
   phase: Phase;
@@ -41,9 +41,10 @@ type Action =
   | { type: "keys"; pair: State["pair"]; publicKeyText: string; secretKeyText: string; duration: number; elapsed: number }
   | { type: "encrypted"; value: Uint8Array; duration: number; elapsed: number }
   | { type: "decrypted"; value: string; plaintextSize: number; duration: number; elapsed: number; verified: boolean }
-  | { type: "signed"; signatureHex: string; duration: number; elapsed: number }
+  | { type: "signed"; signature: Uint8Array; duration: number; elapsed: number }
   | { type: "verified"; valid: boolean; duration: number; elapsed: number }
-  | { type: "error"; value: string };
+  | { type: "error"; value: string }
+  | { type: "invalid"; value: string };
 
 const initialEncryptAlgorithm: KemAlgorithm = "x-wing";
 const initialSignAlgorithm: SignatureAlgorithm = "ml-dsa-65";
@@ -54,7 +55,7 @@ const initial: State = {
   algorithm: initialEncryptAlgorithm,
   pair: null, publicKeyText: null, secretKeyText: null,
   ciphertext: null, plaintext: null, plaintextSize: null, verified: false,
-  signatureHex: null, signatureValid: null,
+  signature: null, signatureValid: null,
   times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null },
   phase: "idle", error: null, trace: [],
 };
@@ -68,12 +69,14 @@ function reducer(s: State, a: Action): State {
     }
     case "algorithm": return { ...initial, mode: s.mode, message: s.message, algorithm: a.value as DemoAlgorithm };
     case "phase": return { ...s, phase: a.value, error: null };
-    case "keys": return { ...s, pair: a.pair, publicKeyText: a.publicKeyText, secretKeyText: a.secretKeyText, phase: "idle", ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signatureHex: null, signatureValid: null, times: { key: a.duration, encrypt: null, decrypt: null, sign: null, verify: null }, error: null, trace: [{ label: "Key pair generated", detail: "Post-quantum key pair ready", time: a.elapsed, tone: "accent" }] };
+    case "keys": return { ...s, pair: a.pair, publicKeyText: a.publicKeyText, secretKeyText: a.secretKeyText, phase: "idle", ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signature: null, signatureValid: null, times: { key: a.duration, encrypt: null, decrypt: null, sign: null, verify: null }, error: null, trace: [{ label: "Key pair generated", detail: "Post-quantum key pair ready", time: a.elapsed, tone: "accent" }] };
     case "encrypted": return { ...s, ciphertext: a.value, phase: "idle", plaintext: null, plaintextSize: null, verified: false, times: { ...s.times, encrypt: a.duration, decrypt: null }, error: null, trace: [...s.trace, { label: "Message encrypted", detail: "Ciphertext sealed with the public key", time: a.elapsed, tone: "accent" }] };
     case "decrypted": return { ...s, plaintext: a.value, plaintextSize: a.plaintextSize, verified: a.verified, phase: "idle", times: { ...s.times, decrypt: a.duration }, error: null, trace: [...s.trace, { label: "Message decrypted", detail: "Plaintext returned", time: a.elapsed, tone: "accent" }, ...(a.verified ? [{ label: "Verification successful", detail: "Plaintext matches the original message", time: a.elapsed, tone: "success" as const }] : [{ label: "Verification failed", detail: "Decrypted plaintext does not match the captured message", time: a.elapsed, tone: "accent" as const }])] };
-    case "signed": return { ...s, signatureHex: a.signatureHex, signatureValid: null, phase: "idle", times: { ...s.times, sign: a.duration, verify: null }, error: null, trace: [...s.trace, { label: "Message signed", detail: "ML-DSA signature produced", time: a.elapsed, tone: "accent" }] };
+    case "signed": return { ...s, signature: a.signature, signatureValid: null, phase: "idle", times: { ...s.times, sign: a.duration, verify: null }, error: null, trace: [...s.trace, { label: "Message signed", detail: "ML-DSA signature produced", time: a.elapsed, tone: "accent" }] };
     case "verified": return { ...s, signatureValid: a.valid, phase: "idle", times: { ...s.times, verify: a.duration }, error: null, trace: [...s.trace, { label: a.valid ? "Signature verified" : "Signature invalid", detail: a.valid ? "Signature is authentic and untampered" : "Signature verification failed", time: a.elapsed, tone: a.valid ? "success" : "accent" }] };
-    case "error": return { ...s, phase: "idle", pair: null, publicKeyText: null, secretKeyText: null, ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signatureHex: null, signatureValid: null, times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null }, error: a.value, trace: [] };
+    case "error": return { ...s, phase: "idle", pair: null, publicKeyText: null, secretKeyText: null, ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signature: null, signatureValid: null, times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null }, error: a.value, trace: [] };
+    // Input validation only reports the problem; keys and prior results stay intact.
+    case "invalid": return { ...s, phase: "idle", error: a.value };
   }
 }
 
@@ -117,10 +120,11 @@ async function generateDsaPair(pqc: typeof import("@pqc-sdk/core").pqc, algorith
 // ── Demo component ────────────────────────────────────────────────────────────
 export function Demo() {
   const [s, d] = useReducer(reducer, initial);
-  const [copied, setCopied] = useState(false);
+  const [copiedText, setCopiedText] = useState<string | null>(null);
   const [copyError, setCopyError] = useState(false);
   const [installTab, setInstallTab] = useState<"npm" | "pnpm" | "yarn" | "mcp">("npm");
   const operationLock = useRef(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const executionSnapshot = useRef<string | null>(null);
   const installTabsRef = useRef<HTMLDivElement>(null);
 
@@ -179,9 +183,8 @@ export function Demo() {
     const t = performance.now();
     const sig = await pqc.sign(message, pair.secretKey);
     const now = performance.now();
-    const signatureHex = hex(sig);
-    d({ type: "signed", signatureHex, duration: now - t, elapsed: now - traceStart });
-    return { sig, signatureHex };
+    d({ type: "signed", signature: sig, duration: now - t, elapsed: now - traceStart });
+    return sig;
   }
   async function verifyMessage(pqc: typeof import("@pqc-sdk/core").pqc, message: string, sig: Uint8Array, pair: DsaPair, traceStart: number) {
     d({ type: "phase", value: "verifying" });
@@ -204,7 +207,8 @@ export function Demo() {
     finally { operationLock.current = false; }
   }
   async function encrypt() {
-    if (!s.pair || !s.message.trim()) return d({ type: "error", value: "Enter a message before encrypting." });
+    if (!s.pair) return d({ type: "invalid", value: "Generate keys before encrypting." });
+    if (!s.message.trim()) return d({ type: "invalid", value: "Enter a message before encrypting." });
     if (!beginOperation()) return;
     const message = s.message;
     executionSnapshot.current = message;
@@ -223,7 +227,8 @@ export function Demo() {
     finally { operationLock.current = false; }
   }
   async function sign() {
-    if (!s.pair || !s.message.trim()) return d({ type: "error", value: "Enter a message before signing." });
+    if (!s.pair) return d({ type: "invalid", value: "Generate keys before signing." });
+    if (!s.message.trim()) return d({ type: "invalid", value: "Enter a message before signing." });
     if (!beginOperation()) return;
     executionSnapshot.current = s.message;
     try {
@@ -233,17 +238,16 @@ export function Demo() {
     finally { operationLock.current = false; }
   }
   async function verifySignature() {
-    if (!s.pair || !s.signatureHex || !beginOperation()) return;
+    if (!s.pair || !s.signature || !beginOperation()) return;
     try {
       const { pqc } = await import("@pqc-sdk/core");
-      const sigBytes = fromHex(s.signatureHex);
-      await verifyMessage(pqc, s.message, sigBytes, s.pair as DsaPair, performance.now());
+      await verifyMessage(pqc, s.message, s.signature, s.pair as DsaPair, performance.now());
     } catch (err) { d({ type: "error", value: describeError(err, "Verification failed. Reset the demo and try again.") }); }
     finally { operationLock.current = false; }
   }
   async function runComplete() {
     const message = s.message;
-    if (!message.trim()) return d({ type: "error", value: "Enter a message before running the demo." });
+    if (!message.trim()) return d({ type: "invalid", value: "Enter a message before running the demo." });
     if (!beginOperation()) return;
     executionSnapshot.current = message;
     const traceStart = performance.now();
@@ -255,7 +259,7 @@ export function Demo() {
         await decryptMessage(pqc, ciphertext, pair, message, traceStart);
       } else {
         const pair = await generateDsaKeys(pqc, s.algorithm as SignatureAlgorithm, traceStart);
-        const { sig } = await signMessage(pqc, message, pair, traceStart);
+        const sig = await signMessage(pqc, message, pair, traceStart);
         await verifyMessage(pqc, message, sig, pair, traceStart);
       }
     } catch (err) { d({ type: "error", value: describeError(err, "The demo could not complete. Reset it and try again.") }); }
@@ -266,9 +270,12 @@ export function Demo() {
     try {
       if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
       await navigator.clipboard.writeText(text);
-      setCopyError(false); setCopied(true); setTimeout(() => setCopied(false), 1500);
-    } catch { setCopied(false); setCopyError(true); }
+      setCopyError(false); setCopiedText(text);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopiedText(null), 1500);
+    } catch { setCopiedText(null); setCopyError(true); }
   }
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
 
   const installTabs = ["npm", "pnpm", "yarn", "mcp"] as const;
   function handleInstallKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
@@ -285,7 +292,7 @@ export function Demo() {
 
   return (
     <main>
-      <span className="sr-only" aria-live="polite">{copied ? "Copied" : copyError ? "Unable to copy. Please try again." : ""}</span>
+      <span className="sr-only" aria-live="polite">{copiedText ? "Copied" : copyError ? "Unable to copy. Please try again." : ""}</span>
       <Header />
 
       {/* ── Hero / Playground ─────────────────────────────────────────────── */}
@@ -327,7 +334,7 @@ export function Demo() {
                   phase={s.phase} mode={s.mode}
                   verified={isEncryptMode ? s.verified : s.signatureValid === true}
                   sHasPair={!!s.pair}
-                  sHasCipher={isEncryptMode ? !!s.ciphertext : !!s.signatureHex}
+                  sHasCipher={isEncryptMode ? !!s.ciphertext : !!s.signature}
                   times={s.times}
                 />
               </div>
@@ -350,7 +357,7 @@ export function Demo() {
           <div className="overflow-hidden rounded-xl border bg-[#0b0d0f] line">
             <div className="flex justify-between border-b px-4 py-3 line">
               <span className="mono text-[10px] text-[var(--faint)]">quickstart.ts</span>
-              <button onClick={() => copy(codeEncrypt)} className="mono text-[11px] text-[var(--accent)]">{copied ? "Copied" : "Copy code"}</button>
+              <button onClick={() => copy(codeEncrypt)} className="mono text-[11px] text-[var(--accent)]">{copiedText === codeEncrypt ? "Copied" : "Copy code"}</button>
             </div>
             <pre className="overflow-x-auto p-5 text-[12px] leading-7 text-[#c5d0da]"><code>{codeEncrypt}</code></pre>
           </div>
@@ -451,33 +458,33 @@ export function Demo() {
             </div>
             {installTab === "npm" && (
               <div id="install-panel-npm" role="tabpanel" aria-labelledby="install-tab-npm" className="space-y-2">
-                <InstallBlock cmd="npm install @pqc-sdk/core" onCopy={copy} copied={copied} />
-                <InstallBlock cmd="npm install @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+                <InstallBlock cmd="npm install @pqc-sdk/core" onCopy={copy} copiedText={copiedText} />
+                <InstallBlock cmd="npm install @pqc-sdk/cli" onCopy={copy} copiedText={copiedText} label="CLI (optional)" />
               </div>
             )}
             {installTab === "pnpm" && (
               <div id="install-panel-pnpm" role="tabpanel" aria-labelledby="install-tab-pnpm" className="space-y-2">
-                <InstallBlock cmd="pnpm add @pqc-sdk/core" onCopy={copy} copied={copied} />
-                <InstallBlock cmd="pnpm add @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+                <InstallBlock cmd="pnpm add @pqc-sdk/core" onCopy={copy} copiedText={copiedText} />
+                <InstallBlock cmd="pnpm add @pqc-sdk/cli" onCopy={copy} copiedText={copiedText} label="CLI (optional)" />
               </div>
             )}
             {installTab === "yarn" && (
               <div id="install-panel-yarn" role="tabpanel" aria-labelledby="install-tab-yarn" className="space-y-2">
-                <InstallBlock cmd="yarn add @pqc-sdk/core" onCopy={copy} copied={copied} />
-                <InstallBlock cmd="yarn add @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+                <InstallBlock cmd="yarn add @pqc-sdk/core" onCopy={copy} copiedText={copiedText} />
+                <InstallBlock cmd="yarn add @pqc-sdk/cli" onCopy={copy} copiedText={copiedText} label="CLI (optional)" />
               </div>
             )}
             {installTab === "mcp" && (
               <div id="install-panel-mcp" role="tabpanel" aria-labelledby="install-tab-mcp" className="space-y-2">
-                <InstallBlock cmd="npm install -g @pqc-sdk/mcp-server" onCopy={copy} copied={copied} label="MCP server (Claude, Cursor…)" />
-                <InstallBlock cmd="npm install @pqc-sdk/langchain @pqc-sdk/core" onCopy={copy} copied={copied} label="LangChain / LangGraph" />
+                <InstallBlock cmd="npm install -g @pqc-sdk/mcp-server" onCopy={copy} copiedText={copiedText} label="MCP server (Claude, Cursor…)" />
+                <InstallBlock cmd="npm install @pqc-sdk/langchain @pqc-sdk/core" onCopy={copy} copiedText={copiedText} label="LangChain / LangGraph" />
               </div>
             )}
           </div>
         </div>
       </section>
 
-      <CliSection onCopy={copy} />
+      <CliSection onCopy={copy} copiedText={copiedText} />
 
       {/* ── Packages table ───────────────────────────────────────────────────── */}
       <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-28">
@@ -762,13 +769,13 @@ function Playground({ s, busy, generate, encrypt, decrypt, sign, verifySignature
         <Mini title="Generate Keys" operation="generating" active={s.phase === "generating"} time={s.times.key} done={!!s.pair} run={generate} disabled={busy} />
         {isEncrypt ? (
           <>
-            <Mini title="Encrypt Message" operation="encrypting" active={s.phase === "encrypting"} time={s.times.encrypt} done={!!s.ciphertext} run={encrypt} disabled={busy} />
-            <Mini title="Decrypt Message" operation="decrypting" active={s.phase === "decrypting"} time={s.times.decrypt} done={s.verified} run={decrypt} disabled={busy} />
+            <Mini title="Encrypt Message" operation="encrypting" active={s.phase === "encrypting"} time={s.times.encrypt} done={!!s.ciphertext} run={encrypt} disabled={busy || !s.pair} />
+            <Mini title="Decrypt Message" operation="decrypting" active={s.phase === "decrypting"} time={s.times.decrypt} done={s.verified} run={decrypt} disabled={busy || !s.ciphertext} />
           </>
         ) : (
           <>
-            <Mini title="Sign Message" operation="signing" active={s.phase === "signing"} time={s.times.sign} done={!!s.signatureHex} run={sign} disabled={busy} />
-            <Mini title="Verify Signature" operation="verifying" active={s.phase === "verifying"} time={s.times.verify} done={s.signatureValid === true} run={verifySignature} disabled={busy} />
+            <Mini title="Sign Message" operation="signing" active={s.phase === "signing"} time={s.times.sign} done={!!s.signature} run={sign} disabled={busy || !s.pair} />
+            <Mini title="Verify Signature" operation="verifying" active={s.phase === "verifying"} time={s.times.verify} done={s.signatureValid === true} run={verifySignature} disabled={busy || !s.signature} />
           </>
         )}
       </div>
@@ -808,7 +815,7 @@ function Mini({ title, operation, time, active, done, run, disabled }: { title: 
         <span className="block">{active ? `${present}...` : title}</span>
         {done && <span className="mono mt-1 block text-[10px] text-[var(--success)]">{past} in {ms(time)}</span>}
       </span>
-      <button onClick={run} disabled={disabled} className="rounded-md border px-3 py-2 text-xs transition-colors hover:border-[var(--accent)] active:scale-[.98]">{done ? "Run again" : verb}</button>
+      <button onClick={run} disabled={disabled} className="rounded-md border px-3 py-2 text-xs transition-colors hover:border-[var(--accent)] active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-40">{done ? "Run again" : verb}</button>
     </div>
   );
 }
@@ -822,13 +829,13 @@ function Algo({ active, onClick, title, detail, disabled }: { active: boolean; o
   );
 }
 
-function InstallBlock({ cmd, onCopy, copied, label }: { cmd: string; onCopy: (text: string) => void; copied: boolean; label?: string }) {
+function InstallBlock({ cmd, onCopy, copiedText, label }: { cmd: string; onCopy: (text: string) => void; copiedText: string | null; label?: string }) {
   return (
     <div className="overflow-hidden rounded-lg border bg-[#0b0d0f] line">
       {label && <div className="border-b px-4 py-2 text-[10px] text-[var(--faint)] line">{label}</div>}
       <div className="flex items-center justify-between gap-3 px-4 py-3">
         <code className="mono text-sm text-[#c5d0da]">{cmd}</code>
-        <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">{copied ? "Copied" : "Copy"}</button>
+        <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">{copiedText === cmd ? "Copied" : "Copy"}</button>
       </div>
     </div>
   );
@@ -946,19 +953,19 @@ function ExecutionDetails({ s }: { s: State }) {
           {isEncrypt && s.ciphertext && <Detail label="Ciphertext size" value={`${s.ciphertext.byteLength} bytes`} />}
           {isEncrypt && <Detail label="Plaintext size" value={s.plaintextSize === null ? "Waiting" : `${s.plaintextSize} bytes`} />}
           {isEncrypt && <Detail label="Verification status" value={s.verified ? "Messages match" : "Not verified"} success={s.verified} />}
-          {!isEncrypt && s.signatureHex && <Detail label="Signature size" value={`${Math.round(s.signatureHex.length / 2)} bytes`} />}
+          {!isEncrypt && s.signature && <Detail label="Signature size" value={`${s.signature.byteLength} bytes`} />}
           <p className="text-[10px] leading-5 text-[var(--faint)] sm:col-span-2">Post-quantum keys and {isEncrypt ? "ciphertexts" : "signatures"} are larger than classical ones: for comparison, an X25519 public key is 32 bytes and an Ed25519 signature 64 bytes. That size is the price of quantum resistance.</p>
           {!isEncrypt && <Detail label="Signature status" value={s.signatureValid === null ? "Waiting" : s.signatureValid ? "Valid" : "Invalid"} success={s.signatureValid === true} />}
         </div>
       </details>
-      {(s.ciphertext || s.signatureHex) && (
+      {(s.ciphertext || s.signature) && (
         <details open={artifactsOpen} onToggle={(e) => setArtifactsOpen(e.currentTarget.open)} className="details-panel mt-3 rounded-lg border line">
           <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Cryptographic artifacts <span className="mono float-right text-[10px] text-[var(--faint)]">previews only</span></summary>
           <div className="space-y-4 border-t px-4 py-4 line">
             {isEncrypt && s.ciphertext && <Detail label="Ciphertext preview" value={hexPreview(s.ciphertext)} />}
             {isEncrypt && <Detail label="Plaintext preview" value={s.plaintext ? preview(s.plaintext) : "Waiting"} />}
             {isEncrypt && <Detail label="Verification result" value={s.verified ? "✓ Messages Match" : "Not verified"} success={s.verified} />}
-            {!isEncrypt && s.signatureHex && <Detail label="Signature preview" value={`${s.signatureHex.slice(0, 36)}...`} />}
+            {!isEncrypt && s.signature && <Detail label="Signature preview" value={hexPreview(s.signature)} />}
             {!isEncrypt && <Detail label="Verification result" value={s.signatureValid === true ? "✓ Signature Valid" : s.signatureValid === false ? "✗ Invalid" : "Not verified"} success={s.signatureValid === true} />}
           </div>
         </details>
@@ -1023,5 +1030,4 @@ function describeError(err: unknown, fallback: string) {
 
 function preview(value: string) { const compact = value.replace(/\s+/g, " ").trim(); return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact; }
 function hex(value: Uint8Array) { return Array.from(value).map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
-function fromHex(value: string) { const clean = value.replace(/\s+/g, ""); if (!/^(?:[0-9a-fA-F]{2})*$/.test(clean)) throw new Error("Invalid hexadecimal."); const result = new Uint8Array(clean.length / 2); for (let i = 0; i < result.length; i++) result[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16); return result; }
 function hexPreview(value: Uint8Array) { return `${hex(value).slice(0, 36)}...`; }
