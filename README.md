@@ -64,14 +64,14 @@ npm install @pqc-sdk/core
 
 ## Packages
 
-| Package | What it does | Tests |
+| Package | Version | What it does |
 | --- | --- | --- |
-| [`@pqc-sdk/core`](https://www.npmjs.com/package/@pqc-sdk/core) | Encryption, signatures, key handling, streaming. Node 20+, Deno, Cloudflare Workers, React Native. | 416 |
-| [`@pqc-sdk/cli`](https://www.npmjs.com/package/@pqc-sdk/cli) | `pqc init / keygen / encrypt / decrypt / audit` — dev scaffolding and file-level crypto. | 54 |
-| [`@pqc-sdk/mcp-server`](https://github.com/jeloercc/pqc-sdk/tree/main/packages/mcp-server) | MCP stdio server — 6 PQC tool calls for Claude Desktop, Cursor, Continue, and any MCP host. | 13 |
-| [`@pqc-sdk/langchain`](https://github.com/jeloercc/pqc-sdk/tree/main/packages/langchain) | LangChain / LangGraph `StructuredTool` wrappers + `pqcTools` bundle. | 14 |
+| [`@pqc-sdk/core`](https://www.npmjs.com/package/@pqc-sdk/core) | 0.11.3 | Encryption, signatures, key handling, streaming (`collectDecryptStream`), typed `PqcError` codes, `FIPS_ALGORITHMS`. Node 20+, Deno, Cloudflare Workers, React Native. |
+| [`@pqc-sdk/cli`](https://www.npmjs.com/package/@pqc-sdk/cli) | 0.11.3 | `pqc init / keygen / encrypt / decrypt / audit` — dev scaffolding and file-level crypto. |
+| [`@pqc-sdk/mcp-server`](https://www.npmjs.com/package/@pqc-sdk/mcp-server) | 0.4.3 | MCP stdio server — 7 PQC tools with an on-disk keystore for Claude Desktop, Cursor, Continue, and any MCP host. |
+| [`@pqc-sdk/langchain`](https://www.npmjs.com/package/@pqc-sdk/langchain) | 0.3.3 | LangChain / LangGraph `StructuredTool` wrappers via the `createPqcTools()` factory. |
 
-**497 tests · all passing · 90%+ coverage on core**
+Tested against NIST ACVP known-answer vectors and cross-checked with Cloudflare CIRCL interop vectors. Not FIPS 140-3 / CMVP validated.
 
 ---
 
@@ -80,9 +80,9 @@ npm install @pqc-sdk/core
 ```
 Encryption / Key Exchange
 ────────────────────────────────────────────────────────────────────
-  x-wing        X25519 + ML-KEM-768 + AES-256-GCM   ← default
+  x-wing        X25519 + ML-KEM-768 + AES-256-GCM   ← default (CFRG draft, not FIPS)
   ml-kem-512    FIPS 203 §4 (security category 1)
-  ml-kem-768    FIPS 203 §4 (security category 3)   ← FIPS-only
+  ml-kem-768    FIPS 203 §4 (security category 3)
   ml-kem-1024   FIPS 203 §4 (security category 5)
 
 Signatures
@@ -96,7 +96,7 @@ Signatures
 
 ## AI Agent Integration
 
-The SDK ships first-class support for AI agents. Both integrations expose the same six operations.
+The SDK ships first-class support for AI agents. Since MCP server 0.3.0 / LangChain 0.3.0, **secret keys never pass through the model context**: tools refer to keys by `keyId`, and `pqc_sign` is opt-in.
 
 ### MCP Server (Claude, Cursor, Continue, any MCP host)
 
@@ -109,12 +109,31 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "pqc": { "command": "pqc-mcp" }
+    "pqc": {
+      "command": "pqc-mcp",
+      "env": { "PQC_KEYSTORE_DIR": "/Users/me/.local/share/my-agent/pqc-keys" }
+    }
   }
 }
 ```
 
-The model can then call `pqc_algorithms`, `pqc_keygen`, `pqc_encrypt`, `pqc_decrypt`, `pqc_sign`, `pqc_verify` as native tool calls.
+Point `PQC_KEYSTORE_DIR` at a directory dedicated to the agent — the model can use every key in it.
+
+| Tool | Input | Output |
+| --- | --- | --- |
+| `pqc_algorithms` | — | `{ supported, fips }` |
+| `pqc_keygen` | `algorithm?` (default `x-wing`) | `{ keyId, algorithm, publicToken }` |
+| `pqc_list_keys` | — | `{ keys: [{ keyId, algorithm, publicToken }] }` |
+| `pqc_encrypt` | `publicToken` + `plaintext` or `plaintextBase64` | `{ ciphertextHex }` |
+| `pqc_decrypt` | `keyId`, `ciphertextHex` | `{ encoding: "utf8", plaintext }` or `{ encoding: "base64", plaintextBase64 }` |
+| `pqc_sign` | `keyId`, `message` — only with `PQC_MCP_ENABLE_SIGN=1` | `{ signatureHex }` |
+| `pqc_verify` | `message`, `signatureHex`, `publicToken` | `{ verified }` |
+
+| Env var | Purpose |
+| --- | --- |
+| `PQC_KEYSTORE_DIR` | Keystore directory (default `~/.local/share/pqc-sdk/agent-keys`) |
+| `PQC_MCP_ENABLE_SIGN` | `1` exposes `pqc_sign` (off by default) |
+| `PQC_MCP_MAX_KEYS` | Max keys in the keystore (default `100`, then `KEYSTORE_FULL`) |
 
 ### LangChain / LangGraph
 
@@ -123,13 +142,29 @@ npm install @pqc-sdk/langchain @pqc-sdk/core
 ```
 
 ```ts
-import { pqcTools } from "@pqc-sdk/langchain";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
+import type { SecretKey } from "@pqc-sdk/core";
+import { createPqcTools } from "@pqc-sdk/langchain";
 
-const agent = createReactAgent({ llm: model, tools: pqcTools });
+// Demo only — use durable storage (secrets manager, KMS-wrapped DB) in production.
+const vault = new Map<string, SecretKey>();
+
+const tools = createPqcTools({
+  resolveSecretKey: async (keyId) => {
+    const key = vault.get(keyId);
+    if (!key) throw new Error(`unknown key ${keyId}`);
+    return key;
+  },
+  onSecretKey: async (keyId, secretKey) => { vault.set(keyId, secretKey); },
+  // enableSign: true, // pqc_sign is excluded unless you opt in
+});
+
+const agent = createReactAgent({ llm, tools });
 ```
 
-Each tool is a standard `StructuredTool` with a Zod input schema — the same six operations work identically in both paths.
+Each tool is a standard `StructuredTool` with a Zod input schema. The package performs no I/O — keys move only through your callbacks.
+
+> **Upgrading from 0.2.x:** `pqcTools`, `pqcKeygenTool`, `pqcDecryptTool` and `pqcSignTool` were removed, and `secretToken` inputs/outputs were replaced by `keyId`. Keys generated with 0.2.x were returned to the model; consider rotating them.
 
 ---
 
@@ -235,6 +270,9 @@ The entire page lives in [`components/demo.tsx`](./components/demo.tsx). Each lo
 - [FIPS 203 compliance matrix](https://github.com/jeloercc/pqc-sdk/blob/main/docs/compliance/FIPS-203-MATRIX.md)
 - [FIPS 204 compliance matrix](https://github.com/jeloercc/pqc-sdk/blob/main/docs/compliance/FIPS-204-MATRIX.md)
 - [Security audit (2026-06)](https://github.com/jeloercc/pqc-sdk/blob/main/docs/AUDIT-2026-06.md)
+- [Security review (2026-09)](https://github.com/jeloercc/pqc-sdk/blob/main/docs/AUDIT-2026-09.md)
+- [Threat model](https://github.com/jeloercc/pqc-sdk/blob/main/docs/security/THREAT-MODEL.md)
+- [Core changelog](https://github.com/jeloercc/pqc-sdk/blob/main/packages/core/CHANGELOG.md)
 - [A2A agent protocol spec](https://github.com/jeloercc/pqc-sdk/tree/main/MPC)
 
 ---
