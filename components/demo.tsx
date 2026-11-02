@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
-import type { KeyPair, KemAlgorithm, SignatureAlgorithm } from "@pqc-sdk/core";
+import type { KeyPair, KemAlgorithm, PqcErrorCode, SignatureAlgorithm } from "@pqc-sdk/core";
 
 // ── Algorithm types ─────────────────────────────────────────────────────────
 type DemoAlgorithm = KemAlgorithm | SignatureAlgorithm;
@@ -88,7 +88,13 @@ const plaintext = await pqc.decrypt(ciphertext, pair.secretKey);
 // ── Digital signatures (ML-DSA-65) ──────────────
 const signer = await pqc.keys.generate({ algorithm: 'ml-dsa-65' });
 const signature = await pqc.sign('document', signer.secretKey);
-const valid = await pqc.verify('document', signature, signer.publicKey);`;
+const valid = await pqc.verify('document', signature, signer.publicKey);
+
+// ── Typed errors + FIPS-only subset (0.11) ──────
+import { PqcError, FIPS_ALGORITHMS } from '@pqc-sdk/core';
+try { await pqc.decrypt(tampered, pair.secretKey); }
+catch (e) { if (e instanceof PqcError) console.log(e.code); } // DECRYPTION_FAILED
+FIPS_ALGORITHMS.includes('x-wing'); // false — CFRG draft`;
 
 async function generateKemPair(pqc: typeof import("@pqc-sdk/core").pqc, algorithm: KemAlgorithm): Promise<KemPair> {
   return pqc.keys.generate({ algorithm });
@@ -176,7 +182,7 @@ export function Demo() {
       const { pqc } = await import("@pqc-sdk/core");
       if (isEncryptMode) await generateKemKeys(pqc, s.algorithm as KemAlgorithm, performance.now());
       else await generateDsaKeys(pqc, s.algorithm as SignatureAlgorithm, performance.now());
-    } catch { d({ type: "error", value: "The cryptographic module could not initialize. Try a current browser and run again." }); }
+    } catch (err) { d({ type: "error", value: describeError(err, "The cryptographic module could not initialize. Try a current browser and run again.") }); }
     finally { operationLock.current = false; }
   }
   async function encrypt() {
@@ -187,7 +193,7 @@ export function Demo() {
     try {
       const { pqc } = await import("@pqc-sdk/core");
       await encryptMessage(pqc, message, s.pair as KemPair, performance.now());
-    } catch { d({ type: "error", value: "Encryption failed. Reset the demo and try again." }); }
+    } catch (err) { d({ type: "error", value: describeError(err, "Encryption failed. Reset the demo and try again.") }); }
     finally { operationLock.current = false; }
   }
   async function decrypt() {
@@ -195,7 +201,7 @@ export function Demo() {
     try {
       const { pqc } = await import("@pqc-sdk/core");
       await decryptMessage(pqc, s.ciphertext, s.pair as KemPair, executionSnapshot.current, performance.now());
-    } catch { d({ type: "error", value: "Decryption failed. Reset the demo and try again." }); }
+    } catch (err) { d({ type: "error", value: describeError(err, "Decryption failed. Reset the demo and try again.") }); }
     finally { operationLock.current = false; }
   }
   async function sign() {
@@ -205,7 +211,7 @@ export function Demo() {
     try {
       const { pqc } = await import("@pqc-sdk/core");
       await signMessage(pqc, s.message, s.pair as DsaPair, performance.now());
-    } catch { d({ type: "error", value: "Signing failed. Reset the demo and try again." }); }
+    } catch (err) { d({ type: "error", value: describeError(err, "Signing failed. Reset the demo and try again.") }); }
     finally { operationLock.current = false; }
   }
   async function verifySignature() {
@@ -214,7 +220,7 @@ export function Demo() {
       const { pqc } = await import("@pqc-sdk/core");
       const sigBytes = fromHex(s.signatureHex);
       await verifyMessage(pqc, s.message, sigBytes, s.pair as DsaPair, performance.now());
-    } catch { d({ type: "error", value: "Verification failed. Reset the demo and try again." }); }
+    } catch (err) { d({ type: "error", value: describeError(err, "Verification failed. Reset the demo and try again.") }); }
     finally { operationLock.current = false; }
   }
   async function runComplete() {
@@ -234,7 +240,7 @@ export function Demo() {
         const { sig } = await signMessage(pqc, message, pair, traceStart);
         await verifyMessage(pqc, message, sig, pair, traceStart);
       }
-    } catch { d({ type: "error", value: "The demo could not complete. Reset it and try again." }); }
+    } catch (err) { d({ type: "error", value: describeError(err, "The demo could not complete. Reset it and try again.") }); }
     finally { operationLock.current = false; }
   }
 
@@ -378,20 +384,20 @@ export function Demo() {
               <p className="mono text-[10px] uppercase tracking-[.18em] text-[var(--accent)]">First-class AI integration</p>
               <h2 className="mt-4 text-3xl font-semibold tracking-[-.04em] sm:text-4xl">PQC operations as native AI tool calls.</h2>
               <p className="mt-4 text-sm leading-6 text-[var(--muted)]">
-                The SDK ships an MCP stdio server and LangChain/LangGraph tool wrappers. Drop the same six operations — list algorithms, keygen, encrypt, decrypt, sign, verify — into any AI agent.
+                The SDK ships an MCP stdio server and LangChain/LangGraph tool wrappers. Secret keys never enter the model context: tools reference keys by keyId, the secret material stays in a keystore or your own vault, and signing is opt-in.
               </p>
               <div className="mt-8 space-y-4">
                 <AgentCard
                   title="@pqc-sdk/mcp-server"
                   badge="MCP"
-                  desc="Works with Claude Desktop, Cursor, Continue, and any MCP-compatible host. Install globally and add one JSON config block."
-                  code={`npm install -g @pqc-sdk/mcp-server\n# Claude Desktop: add "pqc": { "command": "pqc-mcp" }`}
+                  desc="Works with Claude Desktop, Cursor, Continue, and any MCP host. Secret keys live in an on-disk keystore (0600 files, 0700 dir); point PQC_KEYSTORE_DIR at a directory dedicated to the agent."
+                  code={`npm install -g @pqc-sdk/mcp-server\n\n"pqc": {\n  "command": "pqc-mcp",\n  "env": { "PQC_KEYSTORE_DIR": "~/.local/share/my-agent/pqc-keys" }\n}\n# PQC_MCP_ENABLE_SIGN=1 exposes pqc_sign`}
                 />
                 <AgentCard
                   title="@pqc-sdk/langchain"
                   badge="LangChain"
-                  desc="Structured tools for LangGraph agents, OpenAI tool-calling, and Anthropic tool-use. Drop pqcTools into any createReactAgent call."
-                  code={`import { pqcTools } from '@pqc-sdk/langchain';\nconst agent = createReactAgent({ llm: model, tools: pqcTools });`}
+                  desc="Structured tools for LangGraph agents, OpenAI tool-calling, and Anthropic tool-use. createPqcTools() wires keys through your own callbacks — the package performs no I/O."
+                  code={`import { createPqcTools } from '@pqc-sdk/langchain';\n\nconst tools = createPqcTools({\n  resolveSecretKey: async (keyId) => vault.get(keyId),\n  onSecretKey: async (keyId, key) => vault.set(keyId, key),\n  // enableSign: true,\n});\nconst agent = createReactAgent({ llm, tools });`}
                 />
               </div>
             </div>
@@ -463,10 +469,10 @@ export function Demo() {
         <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Four packages. One purpose.</h2>
         <p className="mt-3 text-sm text-[var(--muted)]">Each package has a single responsibility. Use only what you need.</p>
         <div className="mt-10 grid gap-3 sm:grid-cols-2">
-          <PackageCard name="@pqc-sdk/core" badge="497 tests" desc="Encryption, signatures, key handling, and streaming. Node 20+, Deno, Cloudflare Workers, React Native." href="https://www.npmjs.com/package/@pqc-sdk/core" />
-          <PackageCard name="@pqc-sdk/cli" badge="CLI" desc="pqc init / keygen / encrypt / decrypt / audit — project scaffolding and file-level crypto via npx." href="https://www.npmjs.com/package/@pqc-sdk/cli" />
-          <PackageCard name="@pqc-sdk/mcp-server" badge="MCP" desc="stdio server exposing 6 PQC tool calls. Compatible with Claude Desktop, Cursor, Continue, and any MCP host." href="https://github.com/jeloercc/pqc-sdk" />
-          <PackageCard name="@pqc-sdk/langchain" badge="LangChain" desc="StructuredTool wrappers for LangGraph agents, OpenAI tool-calling, and Anthropic tool-use." href="https://github.com/jeloercc/pqc-sdk" />
+          <PackageCard name="@pqc-sdk/core" badge="v0.11.3" desc="Encryption, signatures, key handling, streaming (incl. collectDecryptStream), typed PqcError codes. Node 20+, Deno, Cloudflare Workers, React Native." href="https://www.npmjs.com/package/@pqc-sdk/core" />
+          <PackageCard name="@pqc-sdk/cli" badge="v0.11.3" desc="pqc init / keygen / encrypt / decrypt / audit — project scaffolding and file-level crypto via npx." href="https://www.npmjs.com/package/@pqc-sdk/cli" />
+          <PackageCard name="@pqc-sdk/mcp-server" badge="v0.4.3" desc="stdio server with 7 PQC tools and an on-disk keystore. Keys are referenced by keyId; signing is off unless PQC_MCP_ENABLE_SIGN=1." href="https://www.npmjs.com/package/@pqc-sdk/mcp-server" />
+          <PackageCard name="@pqc-sdk/langchain" badge="v0.3.3" desc="createPqcTools() factory: StructuredTool wrappers for LangGraph, OpenAI tool-calling, and Anthropic tool-use. Ships TypeScript declarations." href="https://www.npmjs.com/package/@pqc-sdk/langchain" />
         </div>
       </section>
 
@@ -490,6 +496,7 @@ export function Demo() {
             <p className="mt-4 text-sm leading-6 text-[var(--muted)]">
               Clause-by-clause matrices cover 43 requirements across both standards. Six NONCONFORMING findings were identified and closed: floating-point arithmetic, implicit-reject branches, missing zeroization, and wrong error attribution.
             </p>
+            <p className="mt-3 text-sm leading-6 text-[var(--muted)]">Since 0.11, an RNG failure during key generation, encapsulation, ML-DSA signing, or drawing the AES-GCM nonce in encrypt reports the dedicated <span className="mono text-xs">RBG_FAILURE</span> code instead of a raw host error.</p>
             <p className="mt-3 text-xs text-[var(--faint)]">This is self-assessment, not CMVP validation. ACVP vectors passing is assurance evidence, not proof of every clause.</p>
           </div>
           <div className="space-y-3">
@@ -526,7 +533,9 @@ export function Demo() {
             <a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Documentation</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Quick start</span></a>
             <a href="https://jeloercc.github.io/pqc-sdk/api/" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">API Reference</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">API</span></a>
             <a href="https://www.npmjs.com/package/@pqc-sdk/core" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">npm package</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">@pqc-sdk/core</span></a>
-            <a href="https://github.com/jeloercc/pqc-sdk/blob/main/docs/AUDIT-2026-06.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Security Audit</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">AUDIT-2026-06</span></a>
+            <a href="https://github.com/jeloercc/pqc-sdk/blob/main/docs/AUDIT-2026-09.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Security Review</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">AUDIT-2026-09</span></a>
+            <a href="https://github.com/jeloercc/pqc-sdk/blob/main/docs/security/THREAT-MODEL.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Threat Model</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Audit scope</span></a>
+            <a href="https://github.com/jeloercc/pqc-sdk/blob/main/packages/core/CHANGELOG.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Changelog</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">@pqc-sdk/core</span></a>
             <a href="https://github.com/jeloercc/pqc-sdk/tree/main/MPC" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">A2A Protocol</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Agent-to-Agent spec</span></a>
           </div>
         </div>
@@ -619,8 +628,8 @@ function TrustPanel() {
         <a href="https://github.com/jeloercc/pqc-sdk/tree/main/docs/compliance" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
           <span className="block font-medium">FIPS 203 / 204</span><span className="mt-1 block text-xs text-[var(--muted)]">Self-assessed</span>
         </a>
-        <a href="https://www.npmjs.com/package/@pqc-sdk/core" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
-          <span className="block font-medium">497 Tests</span><span className="mt-1 block text-xs text-[var(--muted)]">All passing</span>
+        <a href="https://github.com/jeloercc/pqc-sdk/tree/main/docs/security" target="_blank" rel="noreferrer" className="border-l pl-4 text-sm line">
+          <span className="block font-medium">NIST ACVP vectors</span><span className="mt-1 block text-xs text-[var(--muted)]">+ CIRCL interop, threat model</span>
         </a>
       </div>
     </section>
@@ -640,14 +649,14 @@ function Playground({ s, busy, generate, encrypt, decrypt, sign, verifySignature
   const isSign = s.mode === "sign";
   const succeedState = isEncrypt ? s.verified : s.signatureValid === true;
   const kemAlgorithms: { value: KemAlgorithm; label: string; detail: string }[] = [
-    { value: "x-wing", label: "X-Wing", detail: "Hybrid default" },
+    { value: "x-wing", label: "X-Wing", detail: "Hybrid default · CFRG draft" },
     { value: "ml-kem-512", label: "ML-KEM-512", detail: "FIPS 203 cat.1" },
     { value: "ml-kem-768", label: "ML-KEM-768", detail: "FIPS 203 cat.3" },
     { value: "ml-kem-1024", label: "ML-KEM-1024", detail: "FIPS 203 cat.5" },
   ];
   const dsaAlgorithms: { value: SignatureAlgorithm; label: string; detail: string }[] = [
-    { value: "ml-dsa-44", label: "ML-DSA-44", detail: "FIPS 204 cat.2" },
-    { value: "ml-dsa-65", label: "ML-DSA-65", detail: "Recommended" },
+    { value: "ml-dsa-44", label: "ML-DSA-44", detail: "FIPS 204 cat.2 · not default" },
+    { value: "ml-dsa-65", label: "ML-DSA-65", detail: "FIPS 204 cat.3 · recommended" },
     { value: "ml-dsa-87", label: "ML-DSA-87", detail: "FIPS 204 cat.5" },
   ];
 
@@ -805,17 +814,18 @@ function AgentCard({ title, badge, desc, code }: { title: string; badge: string;
 
 function MpcToolTable() {
   const tools = [
-    { tool: "pqc_algorithms", input: "(none)", output: "supported[], fips[]" },
-    { tool: "pqc_keygen", input: "algorithm?", output: "publicToken, secretToken" },
-    { tool: "pqc_encrypt", input: "plaintext, publicToken", output: "ciphertextHex" },
-    { tool: "pqc_decrypt", input: "ciphertextHex, secretToken", output: "plaintext" },
-    { tool: "pqc_sign", input: "message, secretToken", output: "signatureHex" },
+    { tool: "pqc_algorithms", input: "(none)", output: "supported, fips" },
+    { tool: "pqc_keygen", input: "algorithm? (x-wing)", output: "keyId, algorithm, publicToken" },
+    { tool: "pqc_list_keys", input: "(none) · MCP only", output: "keys[]" },
+    { tool: "pqc_encrypt", input: "publicToken, plaintext | plaintextBase64", output: "ciphertextHex" },
+    { tool: "pqc_decrypt", input: "keyId, ciphertextHex", output: "plaintext | plaintextBase64" },
+    { tool: "pqc_sign", input: "keyId, message · opt-in", output: "signatureHex" },
     { tool: "pqc_verify", input: "message, signatureHex, publicToken", output: "verified" },
   ];
   return (
     <div className="overflow-hidden rounded-lg border bg-[rgba(255,255,255,.025)] line">
       <div className="border-b px-4 py-3 line">
-        <span className="mono text-[10px] text-[var(--faint)]">MCP / LangChain tool inventory</span>
+        <span className="mono text-[10px] text-[var(--faint)]">MCP / LangChain tool inventory · no secret key ever returned to the model</span>
       </div>
       <div className="divide-y" style={{ borderColor: "rgba(237,241,244,.08)" }}>
         {tools.map(({ tool, input, output }) => (
@@ -883,6 +893,7 @@ function ExecutionDetails({ s }: { s: State }) {
         <div className="grid gap-x-5 gap-y-4 border-t px-4 py-4 sm:grid-cols-2 line">
           <Detail label="Mode" value={isEncrypt ? "Encryption" : "Signatures"} />
           <Detail label="Algorithm" value={s.algorithm} />
+          <Detail label="Standard" value={s.algorithm === "x-wing" ? "CFRG draft (hybrid, not FIPS)" : s.algorithm.startsWith("ml-kem") ? "NIST FIPS 203" : "NIST FIPS 204"} />
           <Detail label="Public key size" value={`${s.pair.publicKey.bytes.byteLength} bytes`} />
           <Detail label="Secret key size" value={`${s.pair.secretKey.bytes.byteLength} bytes`} />
           {isEncrypt && s.ciphertext && <Detail label="Ciphertext size" value={`${s.ciphertext.byteLength} bytes`} />}
@@ -941,6 +952,25 @@ function Trace({ events }: { events: TraceEvent[] }) {
       </div>
     </div>
   );
+}
+
+// Maps the stable PqcError codes (@pqc-sdk/core 0.11+) to user-facing messages.
+// Duck-typed on `name`/`code` so the SDK stays a lazy dynamic import.
+const errorMessages: Partial<Record<PqcErrorCode, string>> = {
+  RBG_FAILURE: "This browser's secure random generator failed. Try a current browser and run again.",
+  DECRYPTION_FAILED: "Decryption failed: the ciphertext was tampered with or the key does not match.",
+  INVALID_CIPHERTEXT: "The ciphertext is malformed or truncated.",
+  INVALID_KEY: "The key is malformed. Generate a new key pair and try again.",
+  WRONG_ALGORITHM: "The key was generated for a different algorithm.",
+  WRONG_KEY_USE: "That key cannot be used for this operation.",
+  UNSUPPORTED_ALGORITHM: "This algorithm is not supported by the installed SDK version.",
+};
+function describeError(err: unknown, fallback: string) {
+  if (err && typeof err === "object" && (err as { name?: unknown }).name === "PqcError") {
+    const code = (err as { code?: PqcErrorCode }).code;
+    if (code && errorMessages[code]) return `${errorMessages[code]} [${code}]`;
+  }
+  return fallback;
 }
 
 function preview(value: string) { const compact = value.replace(/\s+/g, " ").trim(); return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact; }
