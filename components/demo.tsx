@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { KeyPair, KemAlgorithm, PqcErrorCode, SignatureAlgorithm } from "@pqc-sdk/core";
+import { CliSection, Glossary, HowItWorks, RuntimeSection, VerificationSection } from "./sections";
 
 // ── Algorithm types ─────────────────────────────────────────────────────────
 type DemoAlgorithm = KemAlgorithm | SignatureAlgorithm;
@@ -24,7 +25,7 @@ type State = {
   plaintextSize: number | null;
   verified: boolean;
   // sign mode
-  signatureHex: string | null;
+  signature: Uint8Array | null;
   signatureValid: boolean | null;
   times: { key: number | null; encrypt: number | null; decrypt: number | null; sign: number | null; verify: number | null };
   phase: Phase;
@@ -40,9 +41,10 @@ type Action =
   | { type: "keys"; pair: State["pair"]; publicKeyText: string; secretKeyText: string; duration: number; elapsed: number }
   | { type: "encrypted"; value: Uint8Array; duration: number; elapsed: number }
   | { type: "decrypted"; value: string; plaintextSize: number; duration: number; elapsed: number; verified: boolean }
-  | { type: "signed"; signatureHex: string; duration: number; elapsed: number }
+  | { type: "signed"; signature: Uint8Array; duration: number; elapsed: number }
   | { type: "verified"; valid: boolean; duration: number; elapsed: number }
-  | { type: "error"; value: string };
+  | { type: "error"; value: string }
+  | { type: "invalid"; value: string };
 
 const initialEncryptAlgorithm: KemAlgorithm = "x-wing";
 const initialSignAlgorithm: SignatureAlgorithm = "ml-dsa-65";
@@ -53,7 +55,7 @@ const initial: State = {
   algorithm: initialEncryptAlgorithm,
   pair: null, publicKeyText: null, secretKeyText: null,
   ciphertext: null, plaintext: null, plaintextSize: null, verified: false,
-  signatureHex: null, signatureValid: null,
+  signature: null, signatureValid: null,
   times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null },
   phase: "idle", error: null, trace: [],
 };
@@ -67,14 +69,26 @@ function reducer(s: State, a: Action): State {
     }
     case "algorithm": return { ...initial, mode: s.mode, message: s.message, algorithm: a.value as DemoAlgorithm };
     case "phase": return { ...s, phase: a.value, error: null };
-    case "keys": return { ...s, pair: a.pair, publicKeyText: a.publicKeyText, secretKeyText: a.secretKeyText, phase: "idle", ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signatureHex: null, signatureValid: null, times: { key: a.duration, encrypt: null, decrypt: null, sign: null, verify: null }, error: null, trace: [{ label: "Key pair generated", detail: "Post-quantum key pair ready", time: a.elapsed, tone: "accent" }] };
+    case "keys": return { ...s, pair: a.pair, publicKeyText: a.publicKeyText, secretKeyText: a.secretKeyText, phase: "idle", ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signature: null, signatureValid: null, times: { key: a.duration, encrypt: null, decrypt: null, sign: null, verify: null }, error: null, trace: [{ label: "Key pair generated", detail: "Post-quantum key pair ready", time: a.elapsed, tone: "accent" }] };
     case "encrypted": return { ...s, ciphertext: a.value, phase: "idle", plaintext: null, plaintextSize: null, verified: false, times: { ...s.times, encrypt: a.duration, decrypt: null }, error: null, trace: [...s.trace, { label: "Message encrypted", detail: "Ciphertext sealed with the public key", time: a.elapsed, tone: "accent" }] };
     case "decrypted": return { ...s, plaintext: a.value, plaintextSize: a.plaintextSize, verified: a.verified, phase: "idle", times: { ...s.times, decrypt: a.duration }, error: null, trace: [...s.trace, { label: "Message decrypted", detail: "Plaintext returned", time: a.elapsed, tone: "accent" }, ...(a.verified ? [{ label: "Verification successful", detail: "Plaintext matches the original message", time: a.elapsed, tone: "success" as const }] : [{ label: "Verification failed", detail: "Decrypted plaintext does not match the captured message", time: a.elapsed, tone: "accent" as const }])] };
-    case "signed": return { ...s, signatureHex: a.signatureHex, signatureValid: null, phase: "idle", times: { ...s.times, sign: a.duration, verify: null }, error: null, trace: [...s.trace, { label: "Message signed", detail: "ML-DSA signature produced", time: a.elapsed, tone: "accent" }] };
+    case "signed": return { ...s, signature: a.signature, signatureValid: null, phase: "idle", times: { ...s.times, sign: a.duration, verify: null }, error: null, trace: [...s.trace, { label: "Message signed", detail: "ML-DSA signature produced", time: a.elapsed, tone: "accent" }] };
     case "verified": return { ...s, signatureValid: a.valid, phase: "idle", times: { ...s.times, verify: a.duration }, error: null, trace: [...s.trace, { label: a.valid ? "Signature verified" : "Signature invalid", detail: a.valid ? "Signature is authentic and untampered" : "Signature verification failed", time: a.elapsed, tone: a.valid ? "success" : "accent" }] };
-    case "error": return { ...s, phase: "idle", pair: null, publicKeyText: null, secretKeyText: null, ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signatureHex: null, signatureValid: null, times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null }, error: a.value, trace: [] };
+    case "error": return { ...s, phase: "idle", pair: null, publicKeyText: null, secretKeyText: null, ciphertext: null, plaintext: null, plaintextSize: null, verified: false, signature: null, signatureValid: null, times: { key: null, encrypt: null, decrypt: null, sign: null, verify: null }, error: a.value, trace: [] };
+    // Input validation only reports the problem; keys and prior results stay intact.
+    case "invalid": return { ...s, phase: "idle", error: a.value };
   }
 }
+
+const algorithmInfo: Record<DemoAlgorithm, string> = {
+  "x-wing": "Hybrid: classical X25519 combined with post-quantum ML-KEM-768. An attacker must break both. The SDK default. Defined in an IETF CFRG draft, so it is not a NIST FIPS algorithm.",
+  "ml-kem-512": "NIST FIPS 203, security category 1 (comparable to AES-128). Smallest and fastest ML-KEM.",
+  "ml-kem-768": "NIST FIPS 203, security category 3 (comparable to AES-192). Choose it when you need a pure FIPS algorithm.",
+  "ml-kem-1024": "NIST FIPS 203, security category 5 (comparable to AES-256). Largest keys, highest security margin.",
+  "ml-dsa-44": "NIST FIPS 204, security category 2. Smallest signatures, but below the recommended level; the SDK logs a warning.",
+  "ml-dsa-65": "NIST FIPS 204, security category 3. The recommended default for signatures.",
+  "ml-dsa-87": "NIST FIPS 204, security category 5. Largest signatures, highest security margin.",
+};
 
 const ms = (n: number | null) => (n === null ? "Waiting" : `${n.toFixed(1)} ms`);
 
@@ -106,10 +120,11 @@ async function generateDsaPair(pqc: typeof import("@pqc-sdk/core").pqc, algorith
 // ── Demo component ────────────────────────────────────────────────────────────
 export function Demo() {
   const [s, d] = useReducer(reducer, initial);
-  const [copied, setCopied] = useState(false);
+  const [copiedText, setCopiedText] = useState<string | null>(null);
   const [copyError, setCopyError] = useState(false);
   const [installTab, setInstallTab] = useState<"npm" | "pnpm" | "yarn" | "mcp">("npm");
   const operationLock = useRef(false);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const executionSnapshot = useRef<string | null>(null);
   const installTabsRef = useRef<HTMLDivElement>(null);
 
@@ -119,6 +134,13 @@ export function Demo() {
   const succeedState = isEncryptMode ? s.verified : s.signatureValid === true;
   const total = useMemo(() => Object.values(s.times).reduce<number>((a, b) => a + (b ?? 0), 0), [s.times]);
   const max = Math.max(...Object.values(s.times).map((x) => x ?? 0), 1);
+
+  useEffect(() => {
+    const warm = () => { void import("@pqc-sdk/core").catch(() => {}); };
+    const w = window as Window & { requestIdleCallback?: (cb: () => void) => number; cancelIdleCallback?: (id: number) => void };
+    if (w.requestIdleCallback) { const id = w.requestIdleCallback(warm); return () => w.cancelIdleCallback?.(id); }
+    const id = window.setTimeout(warm, 1500); return () => window.clearTimeout(id);
+  }, []);
 
   function beginOperation() { if (operationLock.current) return false; operationLock.current = true; return true; }
 
@@ -161,9 +183,8 @@ export function Demo() {
     const t = performance.now();
     const sig = await pqc.sign(message, pair.secretKey);
     const now = performance.now();
-    const signatureHex = hex(sig);
-    d({ type: "signed", signatureHex, duration: now - t, elapsed: now - traceStart });
-    return { sig, signatureHex };
+    d({ type: "signed", signature: sig, duration: now - t, elapsed: now - traceStart });
+    return sig;
   }
   async function verifyMessage(pqc: typeof import("@pqc-sdk/core").pqc, message: string, sig: Uint8Array, pair: DsaPair, traceStart: number) {
     d({ type: "phase", value: "verifying" });
@@ -186,7 +207,8 @@ export function Demo() {
     finally { operationLock.current = false; }
   }
   async function encrypt() {
-    if (!s.pair || !s.message.trim()) return d({ type: "error", value: "Enter a message before encrypting." });
+    if (!s.pair) return d({ type: "invalid", value: "Generate keys before encrypting." });
+    if (!s.message.trim()) return d({ type: "invalid", value: "Enter a message before encrypting." });
     if (!beginOperation()) return;
     const message = s.message;
     executionSnapshot.current = message;
@@ -205,7 +227,8 @@ export function Demo() {
     finally { operationLock.current = false; }
   }
   async function sign() {
-    if (!s.pair || !s.message.trim()) return d({ type: "error", value: "Enter a message before signing." });
+    if (!s.pair) return d({ type: "invalid", value: "Generate keys before signing." });
+    if (!s.message.trim()) return d({ type: "invalid", value: "Enter a message before signing." });
     if (!beginOperation()) return;
     executionSnapshot.current = s.message;
     try {
@@ -215,17 +238,16 @@ export function Demo() {
     finally { operationLock.current = false; }
   }
   async function verifySignature() {
-    if (!s.pair || !s.signatureHex || !beginOperation()) return;
+    if (!s.pair || !s.signature || !beginOperation()) return;
     try {
       const { pqc } = await import("@pqc-sdk/core");
-      const sigBytes = fromHex(s.signatureHex);
-      await verifyMessage(pqc, s.message, sigBytes, s.pair as DsaPair, performance.now());
+      await verifyMessage(pqc, s.message, s.signature, s.pair as DsaPair, performance.now());
     } catch (err) { d({ type: "error", value: describeError(err, "Verification failed. Reset the demo and try again.") }); }
     finally { operationLock.current = false; }
   }
   async function runComplete() {
     const message = s.message;
-    if (!message.trim()) return d({ type: "error", value: "Enter a message before running the demo." });
+    if (!message.trim()) return d({ type: "invalid", value: "Enter a message before running the demo." });
     if (!beginOperation()) return;
     executionSnapshot.current = message;
     const traceStart = performance.now();
@@ -237,7 +259,7 @@ export function Demo() {
         await decryptMessage(pqc, ciphertext, pair, message, traceStart);
       } else {
         const pair = await generateDsaKeys(pqc, s.algorithm as SignatureAlgorithm, traceStart);
-        const { sig } = await signMessage(pqc, message, pair, traceStart);
+        const sig = await signMessage(pqc, message, pair, traceStart);
         await verifyMessage(pqc, message, sig, pair, traceStart);
       }
     } catch (err) { d({ type: "error", value: describeError(err, "The demo could not complete. Reset it and try again.") }); }
@@ -248,9 +270,12 @@ export function Demo() {
     try {
       if (!navigator.clipboard) throw new Error("Clipboard API unavailable");
       await navigator.clipboard.writeText(text);
-      setCopyError(false); setCopied(true); setTimeout(() => setCopied(false), 1500);
-    } catch { setCopied(false); setCopyError(true); }
+      setCopyError(false); setCopiedText(text);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopiedText(null), 1500);
+    } catch { setCopiedText(null); setCopyError(true); }
   }
+  useEffect(() => () => { if (copyTimer.current) clearTimeout(copyTimer.current); }, []);
 
   const installTabs = ["npm", "pnpm", "yarn", "mcp"] as const;
   function handleInstallKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
@@ -267,7 +292,7 @@ export function Demo() {
 
   return (
     <main>
-      <span className="sr-only" aria-live="polite">{copied ? "Copied" : copyError ? "Unable to copy. Please try again." : ""}</span>
+      <span className="sr-only" aria-live="polite">{copiedText ? "Copied" : copyError ? "Unable to copy. Please try again." : ""}</span>
       <Header />
 
       {/* ── Hero / Playground ─────────────────────────────────────────────── */}
@@ -281,7 +306,7 @@ export function Demo() {
                   Encrypt. Sign. <span className="text-[var(--muted)]">Connect AI agents.</span>
                 </h1>
                 <p className="mt-4 max-w-[560px] text-sm leading-6 text-[var(--muted)]">
-                  Hybrid encryption, digital signatures, MCP server, and LangChain tools — all in a pure TypeScript SDK. Try the full round trip locally.
+                  An open-source TypeScript SDK for encryption and digital signatures that stay secure against future quantum computers, built on the NIST FIPS 203 and 204 standards. It also gives AI agents the same operations as tools. Everything below runs in your browser; nothing is sent to a server.
                 </p>
               </div>
               <div className="workspace-status mono">
@@ -289,17 +314,10 @@ export function Demo() {
                 <span>{busy ? s.phase.toUpperCase() : succeedState ? (isEncryptMode ? "VERIFIED" : "VALID") : "READY"}</span>
                 <span className="text-[var(--faint)]">LOCAL SESSION</span>
               </div>
-              <nav className="mobile-navigation" aria-label="Section navigation">
-                <a href="#demo">Playground</a>
-                <a href="#ai-agents">AI Agents</a>
-                <a href="#install">Install</a>
-                <a href="#why-pqc">Why PQC</a>
-                <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer">GitHub</a>
-              </nav>
             </div>
             <div className="workspace-grid">
               <div className="workspace-control">
-                <div className="workspace-region-label">Control plane</div>
+                <div className="workspace-region-label">1 · Try it</div>
                 <Playground
                   s={s} busy={busy}
                   generate={generate} encrypt={encrypt} decrypt={decrypt}
@@ -311,12 +329,12 @@ export function Demo() {
                 />
               </div>
               <div className="workspace-observe">
-                <div className="workspace-region-label">Execution plane</div>
+                <div className="workspace-region-label">2 · What is happening</div>
                 <CryptoViz
                   phase={s.phase} mode={s.mode}
                   verified={isEncryptMode ? s.verified : s.signatureValid === true}
                   sHasPair={!!s.pair}
-                  sHasCipher={isEncryptMode ? !!s.ciphertext : !!s.signatureHex}
+                  sHasCipher={isEncryptMode ? !!s.ciphertext : !!s.signature}
                   times={s.times}
                 />
               </div>
@@ -329,7 +347,7 @@ export function Demo() {
 
       {/* ── Code snippet ─────────────────────────────────────────────────────── */}
       <section className="border-y bg-[#0f1215] py-24 line">
-        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8">
+        <div className="mx-auto grid max-w-[1240px] grid-cols-1 gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8">
           <div>
             <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">The API stays small.</h2>
             <p className="mt-4 max-w-[370px] text-sm leading-6 text-[var(--muted)]">
@@ -339,17 +357,19 @@ export function Demo() {
           <div className="overflow-hidden rounded-xl border bg-[#0b0d0f] line">
             <div className="flex justify-between border-b px-4 py-3 line">
               <span className="mono text-[10px] text-[var(--faint)]">quickstart.ts</span>
-              <button onClick={() => copy(codeEncrypt)} className="mono text-[11px] text-[var(--accent)]">{copied ? "Copied" : "Copy code"}</button>
+              <button onClick={() => copy(codeEncrypt)} className="mono text-[11px] text-[var(--accent)]">{copiedText === codeEncrypt ? "Copied" : "Copy code"}</button>
             </div>
             <pre className="overflow-x-auto p-5 text-[12px] leading-7 text-[#c5d0da]"><code>{codeEncrypt}</code></pre>
           </div>
         </div>
       </section>
 
+      <HowItWorks />
+
       {/* ── Timing metrics ───────────────────────────────────────────────────── */}
       <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-32">
         <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Real work, measured locally.</h2>
-        <p className="mt-3 text-sm text-[var(--muted)]">A timing trace from this browser session.</p>
+        <p className="mt-3 max-w-[640px] text-sm leading-6 text-[var(--muted)]">These numbers come from the run you just did in this browser, not from a benchmark. Run the playground to fill them in; switch modes to time signatures.</p>
         <div className="mt-10 grid gap-4 lg:grid-cols-[.8fr_1.2fr]">
           <div className="rounded-xl border bg-[var(--surface)] p-6 line">
             <p className="mono text-[10px] text-[var(--faint)]">TOTAL EXECUTION</p>
@@ -379,7 +399,7 @@ export function Demo() {
       {/* ── AI Agent integration ─────────────────────────────────────────────── */}
       <section id="ai-agents" className="border-y bg-[#0f1215] py-24 line">
         <div className="mx-auto max-w-[1240px] px-5 lg:px-8">
-          <div className="grid gap-10 lg:grid-cols-[1fr_1fr]">
+          <div className="grid grid-cols-1 gap-10 lg:grid-cols-[1fr_1fr]">
             <div>
               <p className="mono text-[10px] uppercase tracking-[.18em] text-[var(--accent)]">First-class AI integration</p>
               <h2 className="mt-4 text-3xl font-semibold tracking-[-.04em] sm:text-4xl">PQC operations as native AI tool calls.</h2>
@@ -410,10 +430,10 @@ export function Demo() {
 
       {/* ── Install ──────────────────────────────────────────────────────────── */}
       <section id="install" className="border-b py-24 line">
-        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8">
+        <div className="mx-auto grid max-w-[1240px] grid-cols-1 gap-10 px-5 lg:grid-cols-[.75fr_1.25fr] lg:px-8">
           <div>
             <h2 className="text-3xl font-semibold tracking-[-.04em] sm:text-4xl">Install the SDK.</h2>
-            <p className="mt-4 text-sm text-[var(--muted)]">Add browser-ready post-quantum encryption to a TypeScript project.</p>
+            <p className="mt-4 text-sm leading-6 text-[var(--muted)]">Building an app? Install <span className="mono text-xs">@pqc-sdk/core</span>. Want to work with files from the terminal? Add the CLI. Connecting an AI agent? Pick the AI agent tab.</p>
             <div className="mt-7 flex flex-wrap gap-5 text-sm text-[var(--accent)]">
               <a href="https://jeloercc.github.io/pqc-sdk/" target="_blank" rel="noreferrer">View Documentation</a>
               <a href="https://jeloercc.github.io/pqc-sdk/guide/quickstart" target="_blank" rel="noreferrer">Quick Start</a>
@@ -438,31 +458,33 @@ export function Demo() {
             </div>
             {installTab === "npm" && (
               <div id="install-panel-npm" role="tabpanel" aria-labelledby="install-tab-npm" className="space-y-2">
-                <InstallBlock cmd="npm install @pqc-sdk/core" onCopy={copy} copied={copied} />
-                <InstallBlock cmd="npm install @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+                <InstallBlock cmd="npm install @pqc-sdk/core" onCopy={copy} copiedText={copiedText} />
+                <InstallBlock cmd="npm install @pqc-sdk/cli" onCopy={copy} copiedText={copiedText} label="CLI (optional)" />
               </div>
             )}
             {installTab === "pnpm" && (
               <div id="install-panel-pnpm" role="tabpanel" aria-labelledby="install-tab-pnpm" className="space-y-2">
-                <InstallBlock cmd="pnpm add @pqc-sdk/core" onCopy={copy} copied={copied} />
-                <InstallBlock cmd="pnpm add @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+                <InstallBlock cmd="pnpm add @pqc-sdk/core" onCopy={copy} copiedText={copiedText} />
+                <InstallBlock cmd="pnpm add @pqc-sdk/cli" onCopy={copy} copiedText={copiedText} label="CLI (optional)" />
               </div>
             )}
             {installTab === "yarn" && (
               <div id="install-panel-yarn" role="tabpanel" aria-labelledby="install-tab-yarn" className="space-y-2">
-                <InstallBlock cmd="yarn add @pqc-sdk/core" onCopy={copy} copied={copied} />
-                <InstallBlock cmd="yarn add @pqc-sdk/cli" onCopy={copy} copied={copied} label="CLI (optional)" />
+                <InstallBlock cmd="yarn add @pqc-sdk/core" onCopy={copy} copiedText={copiedText} />
+                <InstallBlock cmd="yarn add @pqc-sdk/cli" onCopy={copy} copiedText={copiedText} label="CLI (optional)" />
               </div>
             )}
             {installTab === "mcp" && (
               <div id="install-panel-mcp" role="tabpanel" aria-labelledby="install-tab-mcp" className="space-y-2">
-                <InstallBlock cmd="npm install -g @pqc-sdk/mcp-server" onCopy={copy} copied={copied} label="MCP server (Claude, Cursor…)" />
-                <InstallBlock cmd="npm install @pqc-sdk/langchain @pqc-sdk/core" onCopy={copy} copied={copied} label="LangChain / LangGraph" />
+                <InstallBlock cmd="npm install -g @pqc-sdk/mcp-server" onCopy={copy} copiedText={copiedText} label="MCP server (Claude, Cursor…)" />
+                <InstallBlock cmd="npm install @pqc-sdk/langchain @pqc-sdk/core" onCopy={copy} copiedText={copiedText} label="LangChain / LangGraph" />
               </div>
             )}
           </div>
         </div>
       </section>
+
+      <CliSection onCopy={copy} copiedText={copiedText} />
 
       {/* ── Packages table ───────────────────────────────────────────────────── */}
       <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-28">
@@ -476,25 +498,28 @@ export function Demo() {
         </div>
       </section>
 
+      <RuntimeSection />
+
       {/* ── Why PQC ──────────────────────────────────────────────────────────── */}
       <section id="why-pqc" className="border-y bg-[#0f1215] py-24 line">
-        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[1.2fr_.8fr] lg:px-8">
+        <div className="mx-auto grid max-w-[1240px] grid-cols-1 gap-10 px-5 lg:grid-cols-[1.2fr_.8fr] lg:px-8">
           <h2 className="max-w-[720px] text-4xl font-semibold leading-[1.05] tracking-[-.05em] sm:text-6xl">Encrypted traffic can be stored today and targeted later.</h2>
           <div className="self-end space-y-4">
-            <p className="border-l-2 border-[var(--accent)] pl-5 text-sm leading-7 text-[var(--muted)]">Post-quantum cryptography is designed to protect against the risk of future large-scale quantum computers. NIST finalised FIPS 203 and FIPS 204 in 2024.</p>
+            <p className="border-l-2 border-[var(--accent)] pl-5 text-sm leading-7 text-[var(--muted)]">A large enough quantum computer running Shor&apos;s algorithm would break RSA, ECDH and ECDSA, the public-key cryptography behind most of today&apos;s internet. That machine does not exist yet, but traffic recorded now can be decrypted once it does (&quot;harvest now, decrypt later&quot;). For data that must stay secret for years, the time to migrate is now. NIST published its first post-quantum standards in 2024:</p>
             <FipsTable />
+            <p className="text-xs leading-5 text-[var(--faint)]">This SDK implements FIPS 203 and 204. SLH-DSA is left out on purpose: its signatures are 7.8 to 49.8 KB versus 3.3 KB for ML-DSA-65, and it is aimed at firmware and long-lived roots of trust rather than everyday request/response traffic.</p>
           </div>
         </div>
       </section>
 
       {/* ── FIPS conformance ─────────────────────────────────────────────────── */}
       <section className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-28">
-        <div className="grid gap-10 lg:grid-cols-[1fr_1fr]">
+        <div className="grid grid-cols-1 gap-10 lg:grid-cols-[1fr_1fr]">
           <div>
             <p className="mono text-[10px] uppercase tracking-[.16em] text-[var(--accent)]">Self-assessment</p>
             <h2 className="mt-3 text-3xl font-semibold tracking-[-.04em] sm:text-4xl">FIPS 203 / 204 conformance.</h2>
             <p className="mt-4 text-sm leading-6 text-[var(--muted)]">
-              Clause-by-clause matrices cover 43 requirements across both standards. Six NONCONFORMING findings were identified and closed: floating-point arithmetic, implicit-reject branches, missing zeroization, and wrong error attribution.
+              Every requirement (&ldquo;shall&rdquo; clause) in FIPS 203 and FIPS 204 was checked against the code: 43 in total, each quoting the standard&apos;s exact text and citing a named test as evidence. Six were found NONCONFORMING, meaning the code broke a rule. The floating-point ones passed NIST test vectors the whole time, which is why vectors alone are not enough. All six were fixed. IDs read as standard + number: F203-19 is requirement 19 of FIPS 203.
             </p>
             <p className="mt-3 text-sm leading-6 text-[var(--muted)]">Since 0.11, an RNG failure during key generation, encapsulation, ML-DSA signing, or drawing the AES-GCM nonce in encrypt reports the dedicated <span className="mono text-xs">RBG_FAILURE</span> code instead of a raw host error.</p>
             <p className="mt-3 text-xs text-[var(--faint)]">This is self-assessment, not CMVP validation. ACVP vectors passing is assurance evidence, not proof of every clause.</p>
@@ -520,9 +545,12 @@ export function Demo() {
         </div>
       </section>
 
+      <VerificationSection />
+      <Glossary />
+
       {/* ── Built in the open ─────────────────────────────────────────────────── */}
       <section className="border-t bg-[var(--surface)] py-24 line">
-        <div className="mx-auto grid max-w-[1240px] gap-10 px-5 lg:grid-cols-[.8fr_1.2fr] lg:px-8">
+        <div className="mx-auto grid max-w-[1240px] grid-cols-1 gap-10 px-5 lg:grid-cols-[.8fr_1.2fr] lg:px-8">
           <div>
             <h2 className="text-4xl font-semibold tracking-[-.05em] sm:text-6xl">Built in the open.</h2>
             <p className="mt-5 max-w-[500px] text-sm leading-6 text-[var(--muted)]">Explore the implementation and install the package from its primary sources.</p>
@@ -536,7 +564,7 @@ export function Demo() {
             <a href="https://github.com/jeloercc/pqc-sdk/blob/main/docs/AUDIT-2026-09.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Security Review</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">AUDIT-2026-09</span></a>
             <a href="https://github.com/jeloercc/pqc-sdk/blob/main/docs/security/THREAT-MODEL.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Threat Model</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Audit scope</span></a>
             <a href="https://github.com/jeloercc/pqc-sdk/blob/main/packages/core/CHANGELOG.md" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">Changelog</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">@pqc-sdk/core</span></a>
-            <a href="https://github.com/jeloercc/pqc-sdk/tree/main/MPC" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">A2A Protocol</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Agent-to-Agent spec</span></a>
+            <a href="https://github.com/jeloercc/pqc-sdk/tree/main/MPC" target="_blank" rel="noreferrer" className="rounded-lg border p-4 line"><span className="block text-sm">A2A Protocol</span><span className="mono mt-2 block text-[10px] text-[var(--muted)]">Spec: PQC-secured channel between two AI agents</span></a>
           </div>
         </div>
       </section>
@@ -554,7 +582,11 @@ export function Demo() {
 function CryptoViz({ phase, mode, verified, sHasPair, sHasCipher, times }: { phase: Phase; mode: Mode; verified: boolean; sHasPair: boolean; sHasCipher: boolean; times: State["times"] }) {
   const state = verified ? "trust" : phase === "generating" ? "commitment" : (phase === "encrypting" || phase === "signing") ? "challenge" : (phase === "decrypting" || phase === "verifying") ? "response" : sHasCipher ? "challenge" : sHasPair ? "commitment" : "entropy";
   const cells = Array.from({ length: 96 }, (_, index) => { const row = Math.floor(index / 16); const col = index % 16; const edge = row === 1 || row === 6 || col === 1 || col === 14; const core = (row >= 2 && row <= 5 && col >= 4 && col <= 11); const diagonal = (row === col - 2 || row === 7 - col); return <span key={index} className={`crypto-pixel crypto-${state} ${edge ? "crypto-edge" : ""} ${core ? "crypto-core" : ""} ${diagonal ? "crypto-diagonal" : ""}`} style={{ "--i": index, "--row": row, "--col": col, "--phase-delay": `${(index % 12) * 55}ms` } as React.CSSProperties} />; });
-  const labels = state === "trust" ? ["ENTROPY", "COMMITMENT", "CHALLENGE", "RESPONSE", "VERIFIED"] : state === "entropy" ? ["ENTROPY", "TRANSCRIPT READY"] : state === "commitment" ? ["ENTROPY", "COMMITMENT"] : state === "challenge" ? ["ENTROPY", "COMMITMENT", "CHALLENGE"] : ["ENTROPY", "COMMITMENT", "CHALLENGE", "RESPONSE"];
+  // Real operation steps; `state` only drives the CSS animation.
+  const steps = mode === "sign" ? ["KEY PAIR", "SIGN", "VERIFY", "VALID"] : ["KEY PAIR", "ENCAPSULATE + SEAL", "DECAPSULATE + OPEN", "MATCH"];
+  const stepCount = { entropy: 0, commitment: 1, challenge: 2, response: 3, trust: 4 }[state];
+  const labels = stepCount === 0 ? ["READY"] : steps.slice(0, stepCount);
+  const stateLabel = { entropy: "IDLE", commitment: "KEYS READY", challenge: mode === "sign" ? "SIGNED" : "SEALED", response: mode === "sign" ? "VERIFYING" : "OPENING", trust: mode === "sign" ? "VALID" : "VERIFIED" }[state];
   const operation =
     phase === "generating" ? { label: "Generate keys", description: "Creating a post-quantum key pair", time: times.key } :
     phase === "encrypting" ? { label: "Encrypt message", description: "Sealing the message with the public key", time: times.encrypt } :
@@ -564,17 +596,17 @@ function CryptoViz({ phase, mode, verified, sHasPair, sHasCipher, times }: { pha
     verified ? { label: mode === "sign" ? "Signature verified" : "Verification complete", description: mode === "sign" ? "Signature is authentic and untampered" : "Plaintext matches the original message", time: mode === "sign" ? times.verify : times.decrypt } :
     sHasCipher ? { label: mode === "sign" ? "Signature ready" : "Ciphertext ready", description: mode === "sign" ? "Signature bytes are ready to verify" : "Encrypted bytes are ready to decrypt", time: mode === "sign" ? times.sign : times.encrypt } :
     sHasPair ? { label: "Key pair ready", description: "Public and secret keys are available", time: times.key } :
-    { label: "Waiting for input", description: "Run the workflow to create a transcript", time: null };
+    { label: "Waiting for input", description: "Press \u201cRun complete\u201d on the left, or go step by step", time: null };
   const execution = phase !== "idle" ? "Running" : verified ? "Complete" : sHasCipher ? "Ready" : sHasPair ? "Ready" : "Idle";
   return (
     <div className={`crypto-visual crypto-state-${state}`} aria-describedby="crypto-execution-live">
-      <div className="crypto-visual-head"><span className="mono">TRANSCRIPT ENGINE</span><span className="mono">{state.toUpperCase()}</span></div>
+      <div className="crypto-visual-head"><span className="mono">OPERATION FLOW</span><span className="mono">{stateLabel}</span></div>
       <div className="crypto-stage" aria-hidden="true">
         <div className="crypto-path crypto-path-a" /><div className="crypto-path crypto-path-b" /><div className="crypto-path crypto-path-c" />
         <div className="crypto-node crypto-node-a" /><div className="crypto-node crypto-node-b" /><div className="crypto-node crypto-node-c" />
         <div className="crypto-lattice">{cells}</div>
       </div>
-      <div className="crypto-transcript" aria-label="Cryptographic phases">{labels.map((label, index) => <span key={label} className={index < labels.length - 1 ? "transcript-done" : "transcript-current"}>{label}</span>)}</div>
+      <div className="crypto-transcript" aria-label="Operation steps">{labels.map((label, index) => <span key={label} className={index < labels.length - 1 ? "transcript-done" : "transcript-current"}>{label}</span>)}</div>
       <div className="crypto-observation">
         <div>
           <span className="mono text-[10px] text-[var(--faint)]">ACTIVE OPERATION</span>
@@ -588,27 +620,42 @@ function CryptoViz({ phase, mode, verified, sHasPair, sHasCipher, times }: { pha
         </div>
       </div>
       <div id="crypto-execution-live" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        Cryptographic transcript: {labels.join(", ")}. Active operation: {operation.label}. {operation.description}. Execution state: {execution}. Elapsed time: {ms(operation.time)}.
+        Operation steps: {labels.join(", ")}. Active operation: {operation.label}. {operation.description}. Execution state: {execution}. Elapsed time: {ms(operation.time)}.
       </div>
     </div>
   );
 }
 
+const navLinks = [
+  ["#demo", "Demo"],
+  ["#how-it-works", "How it works"],
+  ["#ai-agents", "AI Agents"],
+  ["#cli", "CLI"],
+  ["#install", "Install"],
+  ["#verification", "Security"],
+  ["#glossary", "Glossary"],
+] as const;
+
 function Header() {
   return (
-    <header className="site-header mx-auto flex min-h-[72px] max-w-[1240px] flex-wrap items-center justify-between gap-3 border-b px-5 line lg:px-8">
-      <a href="#" className="flex items-center gap-3 text-sm font-semibold">
-        <span className="mono text-[var(--accent)]">[pqc]</span>PQC SDK
-      </a>
-      <nav className="hidden gap-8 text-sm text-[var(--muted)] sm:flex">
-        <a href="#demo">Demo</a>
-        <a href="#ai-agents">AI Agents</a>
-        <a href="#install">Install</a>
-        <a href="#why-pqc">Why PQC</a>
-        <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer">GitHub</a>
-      </nav>
-      <a href="#demo" className="rounded-lg border px-3 py-2 text-xs text-[var(--accent)] line">Run the Demo</a>
-    </header>
+    <div className="site-header-bar sticky top-0 z-50 border-b line">
+      <header className="site-header mx-auto flex min-h-[64px] max-w-[1240px] flex-wrap items-center justify-between gap-x-3 px-5 lg:px-8">
+        <a href="#" className="flex min-h-[44px] items-center gap-3 text-sm font-semibold">
+          <span className="mono text-[var(--accent)]">[pqc]</span>PQC SDK
+        </a>
+        <nav className="hidden gap-7 text-sm text-[var(--muted)] lg:flex" aria-label="Sections">
+          {navLinks.map(([href, label]) => <a key={href} href={href} className="hover:text-[var(--text)]">{label}</a>)}
+          <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer" className="hover:text-[var(--text)]">GitHub</a>
+        </nav>
+        <div className="flex items-center gap-2">
+          <a href="https://github.com/jeloercc/pqc-sdk" target="_blank" rel="noreferrer" className="flex min-h-[40px] items-center rounded-lg border px-3 text-xs text-[var(--muted)] line lg:hidden">GitHub</a>
+          <a href="#demo" className="flex min-h-[40px] items-center rounded-lg border px-3 text-xs text-[var(--accent)] line">Run the Demo</a>
+        </div>
+        <nav className="mobile-navigation lg:hidden" aria-label="Sections">
+          {navLinks.map(([href, label]) => <a key={href} href={href}>{label}</a>)}
+        </nav>
+      </header>
+    </div>
   );
 }
 
@@ -687,6 +734,12 @@ function Playground({ s, busy, generate, encrypt, decrypt, sign, verifySignature
         >Sign / Verify</button>
       </div>
 
+      <p className="mt-3 text-xs leading-5 text-[var(--muted)]">
+        {isEncrypt
+          ? "Encryption keeps a message secret: anyone with the public key can lock it, only the secret key can open it."
+          : "A signature proves who wrote a message and that nobody changed it: only the secret key can sign, anyone with the public key can check."}
+      </p>
+
       <label className="mt-5 block text-[12px] text-[var(--muted)]" htmlFor="hero-message">Message</label>
       <textarea
         id="hero-message"
@@ -698,11 +751,12 @@ function Playground({ s, busy, generate, encrypt, decrypt, sign, verifySignature
       />
 
       {/* Algorithm selection */}
-      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+      <div className="mt-4 grid grid-cols-2 gap-2">
         {(isEncrypt ? kemAlgorithms : dsaAlgorithms).map(({ value, label, detail }) => (
           <Algo key={value} active={s.algorithm === value} onClick={() => onAlgorithm(value)} title={label} detail={detail} disabled={busy} />
         ))}
       </div>
+      <p className="mt-3 text-[11px] leading-5 text-[var(--muted)]" aria-live="polite">{algorithmInfo[s.algorithm]}</p>
 
       <button
         onClick={runComplete}
@@ -715,13 +769,13 @@ function Playground({ s, busy, generate, encrypt, decrypt, sign, verifySignature
         <Mini title="Generate Keys" operation="generating" active={s.phase === "generating"} time={s.times.key} done={!!s.pair} run={generate} disabled={busy} />
         {isEncrypt ? (
           <>
-            <Mini title="Encrypt Message" operation="encrypting" active={s.phase === "encrypting"} time={s.times.encrypt} done={!!s.ciphertext} run={encrypt} disabled={busy} />
-            <Mini title="Decrypt Message" operation="decrypting" active={s.phase === "decrypting"} time={s.times.decrypt} done={s.verified} run={decrypt} disabled={busy} />
+            <Mini title="Encrypt Message" operation="encrypting" active={s.phase === "encrypting"} time={s.times.encrypt} done={!!s.ciphertext} run={encrypt} disabled={busy || !s.pair} />
+            <Mini title="Decrypt Message" operation="decrypting" active={s.phase === "decrypting"} time={s.times.decrypt} done={s.verified} run={decrypt} disabled={busy || !s.ciphertext} />
           </>
         ) : (
           <>
-            <Mini title="Sign Message" operation="signing" active={s.phase === "signing"} time={s.times.sign} done={!!s.signatureHex} run={sign} disabled={busy} />
-            <Mini title="Verify Signature" operation="verifying" active={s.phase === "verifying"} time={s.times.verify} done={s.signatureValid === true} run={verifySignature} disabled={busy} />
+            <Mini title="Sign Message" operation="signing" active={s.phase === "signing"} time={s.times.sign} done={!!s.signature} run={sign} disabled={busy || !s.pair} />
+            <Mini title="Verify Signature" operation="verifying" active={s.phase === "verifying"} time={s.times.verify} done={s.signatureValid === true} run={verifySignature} disabled={busy || !s.signature} />
           </>
         )}
       </div>
@@ -761,7 +815,7 @@ function Mini({ title, operation, time, active, done, run, disabled }: { title: 
         <span className="block">{active ? `${present}...` : title}</span>
         {done && <span className="mono mt-1 block text-[10px] text-[var(--success)]">{past} in {ms(time)}</span>}
       </span>
-      <button onClick={run} disabled={disabled} className="rounded-md border px-3 py-2 text-xs transition-colors hover:border-[var(--accent)] active:scale-[.98]">{done ? "Run again" : verb}</button>
+      <button onClick={run} disabled={disabled} className="rounded-md border px-3 py-2 text-xs transition-colors hover:border-[var(--accent)] active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-40">{done ? "Run again" : verb}</button>
     </div>
   );
 }
@@ -775,13 +829,13 @@ function Algo({ active, onClick, title, detail, disabled }: { active: boolean; o
   );
 }
 
-function InstallBlock({ cmd, onCopy, copied, label }: { cmd: string; onCopy: (text: string) => void; copied: boolean; label?: string }) {
+function InstallBlock({ cmd, onCopy, copiedText, label }: { cmd: string; onCopy: (text: string) => void; copiedText: string | null; label?: string }) {
   return (
     <div className="overflow-hidden rounded-lg border bg-[#0b0d0f] line">
       {label && <div className="border-b px-4 py-2 text-[10px] text-[var(--faint)] line">{label}</div>}
       <div className="flex items-center justify-between gap-3 px-4 py-3">
         <code className="mono text-sm text-[#c5d0da]">{cmd}</code>
-        <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">{copied ? "Copied" : "Copy"}</button>
+        <button onClick={() => onCopy(cmd)} className="mono shrink-0 text-[11px] text-[var(--accent)]">{copiedText === cmd ? "Copied" : "Copy"}</button>
       </div>
     </div>
   );
@@ -827,12 +881,12 @@ function MpcToolTable() {
       <div className="border-b px-4 py-3 line">
         <span className="mono text-[10px] text-[var(--faint)]">MCP / LangChain tool inventory · no secret key ever returned to the model</span>
       </div>
-      <div className="divide-y" style={{ borderColor: "rgba(237,241,244,.08)" }}>
+      <div className="divide-y divide-[rgba(237,241,244,.08)]">
         {tools.map(({ tool, input, output }) => (
-          <div key={tool} className="grid grid-cols-[1fr_1fr_1fr] gap-2 px-4 py-3 text-[11px]">
+          <div key={tool} className="grid gap-1 px-4 py-3 text-[11px] sm:grid-cols-[1fr_1fr_1fr] sm:gap-2">
             <span className="mono text-[var(--accent)]">{tool}</span>
-            <span className="text-[var(--muted)]">{input}</span>
-            <span className="mono text-[var(--faint)]">{output}</span>
+            <span className="text-[var(--muted)]"><span className="mono text-[var(--faint)] sm:hidden">in · </span>{input}</span>
+            <span className="mono text-[var(--faint)]"><span className="sm:hidden">out · </span>{output}</span>
           </div>
         ))}
       </div>
@@ -846,7 +900,7 @@ function FipsTable() {
       {[
         { std: "FIPS 203", alg: "ML-KEM", replaces: "RSA / ECDH" },
         { std: "FIPS 204", alg: "ML-DSA", replaces: "ECDSA / RSA-sig" },
-        { std: "FIPS 205", alg: "SLH-DSA", replaces: "Long-lived roots" },
+        { std: "FIPS 205", alg: "SLH-DSA", replaces: "Not in this SDK (by design)" },
       ].map(({ std, alg, replaces }) => (
         <div key={std} className="grid grid-cols-3 gap-2 border-b px-4 py-3 text-xs last:border-0 line">
           <span className="mono text-[var(--accent)]">{std}</span>
@@ -899,18 +953,19 @@ function ExecutionDetails({ s }: { s: State }) {
           {isEncrypt && s.ciphertext && <Detail label="Ciphertext size" value={`${s.ciphertext.byteLength} bytes`} />}
           {isEncrypt && <Detail label="Plaintext size" value={s.plaintextSize === null ? "Waiting" : `${s.plaintextSize} bytes`} />}
           {isEncrypt && <Detail label="Verification status" value={s.verified ? "Messages match" : "Not verified"} success={s.verified} />}
-          {!isEncrypt && s.signatureHex && <Detail label="Signature size" value={`${Math.round(s.signatureHex.length / 2)} bytes`} />}
+          {!isEncrypt && s.signature && <Detail label="Signature size" value={`${s.signature.byteLength} bytes`} />}
+          <p className="text-[10px] leading-5 text-[var(--faint)] sm:col-span-2">Post-quantum keys and {isEncrypt ? "ciphertexts" : "signatures"} are larger than classical ones: for comparison, an X25519 public key is 32 bytes and an Ed25519 signature 64 bytes. That size is the price of quantum resistance.</p>
           {!isEncrypt && <Detail label="Signature status" value={s.signatureValid === null ? "Waiting" : s.signatureValid ? "Valid" : "Invalid"} success={s.signatureValid === true} />}
         </div>
       </details>
-      {(s.ciphertext || s.signatureHex) && (
+      {(s.ciphertext || s.signature) && (
         <details open={artifactsOpen} onToggle={(e) => setArtifactsOpen(e.currentTarget.open)} className="details-panel mt-3 rounded-lg border line">
           <summary className="cursor-pointer list-none px-4 py-3 text-sm font-medium">Cryptographic artifacts <span className="mono float-right text-[10px] text-[var(--faint)]">previews only</span></summary>
           <div className="space-y-4 border-t px-4 py-4 line">
             {isEncrypt && s.ciphertext && <Detail label="Ciphertext preview" value={hexPreview(s.ciphertext)} />}
             {isEncrypt && <Detail label="Plaintext preview" value={s.plaintext ? preview(s.plaintext) : "Waiting"} />}
             {isEncrypt && <Detail label="Verification result" value={s.verified ? "✓ Messages Match" : "Not verified"} success={s.verified} />}
-            {!isEncrypt && s.signatureHex && <Detail label="Signature preview" value={`${s.signatureHex.slice(0, 36)}...`} />}
+            {!isEncrypt && s.signature && <Detail label="Signature preview" value={hexPreview(s.signature)} />}
             {!isEncrypt && <Detail label="Verification result" value={s.signatureValid === true ? "✓ Signature Valid" : s.signatureValid === false ? "✗ Invalid" : "Not verified"} success={s.signatureValid === true} />}
           </div>
         </details>
@@ -975,5 +1030,4 @@ function describeError(err: unknown, fallback: string) {
 
 function preview(value: string) { const compact = value.replace(/\s+/g, " ").trim(); return compact.length > 48 ? `${compact.slice(0, 48)}…` : compact; }
 function hex(value: Uint8Array) { return Array.from(value).map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
-function fromHex(value: string) { const clean = value.replace(/\s+/g, ""); if (!/^(?:[0-9a-fA-F]{2})*$/.test(clean)) throw new Error("Invalid hexadecimal."); const result = new Uint8Array(clean.length / 2); for (let i = 0; i < result.length; i++) result[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16); return result; }
 function hexPreview(value: Uint8Array) { return `${hex(value).slice(0, 36)}...`; }
