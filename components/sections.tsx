@@ -107,8 +107,8 @@ function Architecture() {
 export function CliSection({ onCopy, copiedText }: { onCopy: (text: string) => void; copiedText: string | null }) {
   const commands = [
     { cmd: "npx @pqc-sdk/cli init", desc: "Sets up a project in seconds: config file, development keys, .gitignore entries and a working example.ts." },
-    { cmd: "npx @pqc-sdk/cli keygen --algorithm ml-dsa-65 --out keys/", desc: "Generates a key pair and writes it as base64url files (secret key file is 0600)." },
-    { cmd: "npx @pqc-sdk/cli encrypt report.pdf --key keys/alice.public.pqc", desc: "Seals a file with ML-KEM-768 + AES-256-GCM into report.pdf.enc, the same envelope pqc.encrypt produces. Files over 8 MiB stream automatically with bounded memory." },
+    { cmd: "npx @pqc-sdk/cli keygen --name alice", desc: "Generates an X-Wing key pair (the default) as keys/alice.public.pqc and keys/alice.secret.pqc. The secret file is 0600 and .gitignore is updated so it is never committed. Use --algorithm ml-kem-768 for a pure FIPS 203 key, or ml-dsa-65 for a signing key." },
+    { cmd: "npx @pqc-sdk/cli encrypt report.pdf --key keys/alice.public.pqc", desc: "Seals a file with the key's KEM (X-Wing for the key above) + AES-256-GCM into report.pdf.enc, the same envelope pqc.encrypt produces. Files over 8 MiB stream automatically with bounded memory." },
     { cmd: "npx @pqc-sdk/cli decrypt report.pdf.enc --key keys/alice.secret.pqc", desc: "Opens it with the matching secret key. Corrupted or mismatched input is refused instead of written out, and the plaintext is saved readable only by you (0600)." },
     { cmd: "npx @pqc-sdk/cli audit", desc: "Heuristic scan of your dependencies and source for pre-quantum crypto (RSA, ECDSA, ECDH) and what to migrate it to. A starting point for a migration review, not a substitute for one. Exits 1 on findings, so it works as a CI gate." },
   ];
@@ -140,11 +140,11 @@ export function CliSection({ onCopy, copiedText }: { onCopy: (text: string) => v
 export function RuntimeSection() {
   const runtimes = [
     { name: "Node.js", detail: "20 and later. Tested on 24.", example: "examples/node" },
-    { name: "Deno", detail: "2.x", example: "examples/deno" },
+    { name: "Deno", detail: "2.x. Tested on 2.8.", example: "examples/deno" },
     { name: "Cloudflare Workers", detail: "No nodejs_compat flag needed", example: "examples/cloudflare-workers" },
-    { name: "React Native (Expo)", detail: "Verified on a physical Android device. Needs react-native-get-random-values.", example: "examples/react-native-expo" },
+    { name: "React Native (Expo)", detail: "Verified on a physical Android device. Needs react-native-get-random-values. Streaming works through the async-iterable API; the Web Streams adapters are not available.", example: "examples/react-native-expo" },
     { name: "Hermes", detail: "Engine validated. Needs a crypto.getRandomValues polyfill.", example: "examples/hermes-standalone" },
-    { name: "Browser", detail: "Pure TypeScript, no WebAssembly. This page runs it.", example: null },
+    { name: "Browser", detail: "Pure TypeScript, no WebAssembly. Not yet listed in the SDK's verified compatibility table, but this page runs it in your browser.", example: null },
   ];
   return (
     <section id="runtimes" className="mx-auto max-w-[1240px] px-5 py-24 lg:px-8 lg:py-28">
@@ -179,17 +179,18 @@ export function RuntimeSection() {
 // ── Verification + limits ─────────────────────────────────────────────────────
 export function VerificationSection() {
   const checks = [
-    { what: "NIST ACVP vectors", why: "Official known-answer tests from NIST. Every ML-KEM and ML-DSA parameter set, plus the X-Wing reference vectors, must produce exactly the expected bytes." },
-    { what: "Cross-implementation interop", why: "ML-DSA signatures and X-Wing shared secrets are cross-checked against Cloudflare's CIRCL (Go), an independent codebase." },
+    { what: "NIST ACVP vectors", why: "Official test vectors from NIST's ACVP server: key generation and encapsulation/decapsulation for ML-KEM-512/768/1024, key generation and signature verification for ML-DSA-44/65/87. X-Wing is checked against the CFRG draft's own vectors. Every case must produce exactly the expected bytes." },
+    { what: "Cross-implementation interop", why: "ML-DSA-44/65/87 signatures and ML-KEM-768 and X-Wing shared secrets are cross-checked against Cloudflare's CIRCL (Go), an independent codebase." },
     { what: "Golden vectors", why: "Every envelope format version is pinned byte for byte, so an upgrade can never silently break data you already encrypted." },
     { what: "Fuzzing", why: "Key parsing is fed arbitrary and hostile input and must always fail closed." },
     { what: "Property-based tests", why: "decrypt(encrypt(x)) === x for random inputs, and changing any single byte must make decryption fail." },
-    { what: "Stream mutation matrix", why: "Streaming envelopes are truncated, reordered, duplicated and spliced region by region. Every case must be rejected." },
+    { what: "Stream mutation matrix", why: "Streaming envelopes are truncated, reordered, duplicated and spliced between streams. Every case must end in an error, never a clean finish, although chunks already verified may be released first." },
     { what: "Signed releases", why: "Packages are published only from GitHub Actions with npm provenance. Check them yourself with npm audit signatures." },
   ];
   const limits = [
     "Not FIPS 140-3 / CMVP validated. FIPS conformance is a published self-assessment.",
-    "The security reviews are internal and AI-assisted, not an independent third-party audit (one is being prepared).",
+    "The security reviews are internal and AI-assisted, not an independent third-party audit. A scope document for one is published (docs/security/AUDIT-SCOPE.md).",
+    "The underlying @noble/post-quantum library has no independent audit yet either.",
     "JavaScript gives no constant-time guarantees, and memory zeroization of secrets is only partial.",
     "SLH-DSA (FIPS 205) is not implemented, by design: its signatures are 7.8 to 49.8 KB versus 3.3 KB for ML-DSA-65.",
   ];
@@ -232,7 +233,7 @@ export function Glossary() {
     ["ML-KEM (FIPS 203)", "NIST's standard post-quantum KEM, based on lattices. Three sizes: 512, 768 and 1024."],
     ["ML-DSA (FIPS 204)", "NIST's standard post-quantum signature scheme, also lattice-based. Three sizes: 44, 65 and 87."],
     ["X-Wing", "A hybrid KEM that combines classical X25519 with ML-KEM-768. Secure as long as either part holds. Defined in an IETF CFRG draft."],
-    ["Security category", "NIST's strength scale from 1 to 5. Category 1 is comparable to AES-128, 3 to AES-192 and 5 to AES-256. Higher is stronger but larger and slower."],
+    ["Security category", "NIST's strength scale from 1 to 5. Category 1 is comparable to breaking AES-128, 3 to AES-192 and 5 to AES-256; categories 2 and 4 compare to finding SHA-256 and SHA-384 collisions. Higher is stronger but larger and slower."],
     ["AES-256-GCM", "The symmetric cipher that encrypts and authenticates the message itself, keyed with the KEM's shared secret."],
     ["ACVP", "NIST's Automated Cryptographic Validation Protocol. Its test vectors check that an implementation computes exactly the right outputs."],
     ["CMVP / FIPS 140-3", "The formal government certification of a cryptographic module. This SDK is not certified."],
