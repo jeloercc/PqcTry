@@ -521,7 +521,7 @@ export function Demo() {
             <p className="mt-4 text-sm leading-6 text-[var(--muted)]">
               Every requirement (&ldquo;shall&rdquo; clause) in FIPS 203 and FIPS 204 was checked against the code: 43 in total, each quoting the standard&apos;s exact text and citing a named test as evidence. Six were found NONCONFORMING, meaning the code broke a rule. The floating-point ones passed NIST test vectors the whole time, which is why vectors alone are not enough. All six were fixed. IDs read as standard + number: F203-19 is requirement 19 of FIPS 203.
             </p>
-            <p className="mt-3 text-sm leading-6 text-[var(--muted)]">Since 0.11, an RNG failure during key generation, encapsulation, ML-DSA signing, or drawing the AES-GCM nonce in encrypt reports the dedicated <span className="mono text-xs">RBG_FAILURE</span> code instead of a raw host error.</p>
+            <p className="mt-3 text-sm leading-6 text-[var(--muted)]">An RNG failure during key generation, encapsulation or ML-DSA signing (since 0.11.0), or while drawing the AES-GCM nonce in encrypt (since 0.11.3), reports the dedicated <span className="mono text-xs">RBG_FAILURE</span> code instead of a raw host error.</p>
             <p className="mt-3 text-xs text-[var(--faint)]">This is self-assessment, not CMVP validation. ACVP vectors passing is assurance evidence, not proof of every clause.</p>
           </div>
           <div className="space-y-3">
